@@ -103,5 +103,8 @@ class CustomCostSensitiveLoss(_Loss):
         # The total loss is: Rule_Weight * Final_Weight * Base_Loss
         weighted_loss = element_wise_loss * rule_weight_tensor * final_weight
         
+        # 5. Clip extreme values to prevent numerical instability
+        weighted_loss = torch.clamp(weighted_loss, min=-10.0, max=10.0)
+        
         # Return the mean loss across the entire batch
         return weighted_loss.mean()

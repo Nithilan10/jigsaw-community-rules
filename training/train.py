@@ -18,12 +18,12 @@ from custom_loss import CustomCostSensitiveLoss
 
 # --- 0. Configuration and Constants ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-TRANSFORMER_MODEL_NAME = 'microsoft/deberta-base'  # DeBERTa-base (184M parameters)
+TRANSFORMER_MODEL_NAME = 'microsoft/deberta-v3-base'  # DeBERTa-v3-base (184M parameters, better performance)
 TRAIN_FILE_PATH = '../data/train.csv' # Use the actual file name
 NUM_RULES = 1  # IMPORTANT: Set this to your actual number of policy columns
-BATCH_SIZE = 8  # Reduced for DeBERTa (larger model)
-LEARNING_RATE = 2e-5  # Slightly higher for DeBERTa
-NUM_EPOCHS = 3
+BATCH_SIZE = 6  # Further reduced for DeBERTa-v3 (better but larger)
+LEARNING_RATE = 1e-5  # Lower LR for v3 (more stable training)
+NUM_EPOCHS = 5  # More epochs for better convergence
 MAX_SEQ_LENGTH = 256
 VALIDATION_SPLIT_RATIO = 0.15
 RANDOM_SEED = 42
@@ -36,15 +36,14 @@ NUMERICAL_FEATURES = [
 ]
 NUM_NUMERICAL_FEATURES = len(NUMERICAL_FEATURES)
 
-# Custom Loss Weights (The cost-sensitive prioritization logic)
+# Custom Loss Weights (Reduced to prevent instability)
 RULE_WEIGHTS = {
-    2: 7.0,  # Example: Rule 3 (index 2) is highest priority
-    0: 3.0,  # Example: Rule 1 (index 0) is medium priority
+    0: 2.0,  # Reduced from 3.0 to prevent extreme losses
 } 
 FEATURE_WEIGHTS = {
-    'legal_advice_interaction_feature': 8.0,
-    'promo_persuasion_feature': 9.0,
-    'comment_length_short': 5.0 
+    'legal_advice_interaction_feature': 2.0,  # Reduced from 8.0
+    'promo_persuasion_feature': 2.0,          # Reduced from 9.0
+    'comment_length_short': 1.5               # Reduced from 5.0
 }
 
 # --- 1. Custom Dataset Class (No changes needed here) ---
