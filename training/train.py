@@ -54,8 +54,12 @@ class ToxicityDataset(Dataset):
     def __init__(self, df: pd.DataFrame, tokenizer: AutoTokenizer):
         self.texts = df['comment_text'].values
         self.numerical = torch.tensor(df[NUMERICAL_FEATURES].values, dtype=torch.float32)
-        # Assuming your labels are in columns named 'rule_0', 'rule_1', etc.
-        self.labels = torch.tensor(df.filter(regex='rule_').values, dtype=torch.long)
+        # Handle the actual label column 'rule_violation' from the CSV
+        if 'rule_violation' in df.columns:
+            self.labels = torch.tensor(df['rule_violation'].values, dtype=torch.long).unsqueeze(1)
+        else:
+            # Fallback to rule_ columns if they exist
+            self.labels = torch.tensor(df.filter(regex='rule_').values, dtype=torch.long)
         self.tokenizer = tokenizer
 
     def __len__(self):
@@ -127,19 +131,28 @@ def train_model():
     print("--- 1. Data Loading and Splitting ---")
     
     try:
+        print(f"Loading data from: {TRAIN_FILE_PATH}")
         full_train_df = pd.read_csv(TRAIN_FILE_PATH)
+        print(f"Data loaded successfully. Shape: {full_train_df.shape}")
+        print(f"Columns: {list(full_train_df.columns)}")
     except FileNotFoundError:
         print(f"FATAL ERROR: '{TRAIN_FILE_PATH}' not found. Please check file path.")
+        return
+    except Exception as e:
+        print(f"FATAL ERROR loading data: {e}")
         return 
     
     # Identify label columns for stratification
-    label_columns = full_train_df.filter(regex='rule_').columns.tolist()
-    if not label_columns:
-        print("FATAL ERROR: No label columns (e.g., 'rule_0') found in train.csv.")
-        return
-
-    # Create a column for stratification (sum of all rule violations)
-    stratify_col = full_train_df[label_columns].sum(axis=1) 
+    if 'rule_violation' in full_train_df.columns:
+        label_columns = ['rule_violation']
+        stratify_col = full_train_df['rule_violation']
+    else:
+        label_columns = full_train_df.filter(regex='rule_').columns.tolist()
+        if not label_columns:
+            print("FATAL ERROR: No label columns found in train.csv.")
+            return
+        # Create a column for stratification (sum of all rule violations)
+        stratify_col = full_train_df[label_columns].sum(axis=1) 
 
     # Split the full training data into model training and validation sets
     train_df_raw, validation_df_raw = train_test_split(
@@ -178,20 +191,49 @@ def train_model():
         return
 
     # --- Setup DataLoader ---
-    tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL_NAME)
-    train_dataset = ToxicityDataset(train_df_processed, tokenizer)
-    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    print("\nSetting up tokenizer and datasets...")
+    try:
+        print(f"Loading tokenizer: {TRANSFORMER_MODEL_NAME}")
+        tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL_NAME)
+        print("Tokenizer loaded successfully")
+    except Exception as e:
+        print(f"ERROR loading tokenizer: {e}")
+        print("This might be a network issue. Please check your internet connection.")
+        return
     
+    print("Creating training dataset...")
+    train_dataset = ToxicityDataset(train_df_processed, tokenizer)
+    print(f"Training dataset created with {len(train_dataset)} samples")
+    
+    print("Creating training dataloader...")
+    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    print(f"Training dataloader created with {len(train_dataloader)} batches")
+    
+    print("Creating validation dataset...")
     validation_dataset = ToxicityDataset(validation_df_processed, tokenizer)
-    validation_dataloader = DataLoader(validation_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    print(f"Validation dataset created with {len(validation_dataset)} samples")
+    
+    print("Creating validation dataloader...")
+    validation_dataloader = DataLoader(validation_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    print(f"Validation dataloader created with {len(validation_dataloader)} batches")
 
     # --- Model and Loss Initialization ---
     print("\n--- 2. Model and Loss Initialization ---")
+    print(f"Initializing model on device: {DEVICE}")
+    
+    # Clear GPU cache if using CUDA
+    if DEVICE.type == 'cuda':
+        torch.cuda.empty_cache()
+        print(f"GPU memory before model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    
     model = CustomTransformerModel(
         transformer_name=TRANSFORMER_MODEL_NAME, 
         num_numerical_features=NUM_NUMERICAL_FEATURES, 
         num_rules=NUM_RULES
     ).to(DEVICE)
+    
+    if DEVICE.type == 'cuda':
+        print(f"GPU memory after model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
 
     criterion = CustomCostSensitiveLoss(
         rule_weights=RULE_WEIGHTS, 
@@ -202,8 +244,12 @@ def train_model():
 
     # --- Training Loop ---
     print(f"\n--- 3. Starting Training on {DEVICE} ---")
+    print(f"Training dataset size: {len(train_dataset)}")
+    print(f"Number of batches per epoch: {len(train_dataloader)}")
+    print(f"Batch size: {BATCH_SIZE}")
     
     for epoch in range(NUM_EPOCHS):
+        print(f"\nStarting Epoch {epoch+1}/{NUM_EPOCHS}")
         model.train()
         total_loss = 0
         
@@ -220,15 +266,25 @@ def train_model():
             logits = model(input_ids, attention_mask, numerical_features)
             
             # Calculate the Custom Weighted Loss
-            loss = criterion(logits, labels, numerical_features)
+            try:
+                loss = criterion(logits, labels, numerical_features)
+            except Exception as e:
+                print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
+                print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                raise e
             
             loss.backward()
             optimizer.step()
             
             total_loss += loss.item()
             
-            if batch_idx % 100 == 0:
+            if batch_idx % 10 == 0:  # More frequent updates
                 print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Batch {batch_idx}/{len(train_dataloader)}, Loss: {loss.item():.4f}")
+            
+            # Add a safety check to prevent infinite loops
+            if batch_idx > len(train_dataloader) * 2:  # Safety check
+                print(f"WARNING: Batch index {batch_idx} exceeds expected range. Breaking loop.")
+                break
 
         avg_loss = total_loss / len(train_dataloader)
         

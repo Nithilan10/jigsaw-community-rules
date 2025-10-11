@@ -37,6 +37,19 @@ class CustomCostSensitiveLoss(_Loss):
             numerical_features: Pre-engineered features (shape: [Batch, Num_Features])
         """
         
+        # Debug: Check for NaN or infinite values that could cause hanging
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            print("WARNING: NaN or Inf values detected in logits")
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        if torch.isnan(labels).any() or torch.isinf(labels).any():
+            print("WARNING: NaN or Inf values detected in labels")
+            labels = torch.nan_to_num(labels, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        if torch.isnan(numerical_features).any() or torch.isinf(numerical_features).any():
+            print("WARNING: NaN or Inf values detected in numerical_features")
+            numerical_features = torch.nan_to_num(numerical_features, nan=0.0, posinf=1.0, neginf=-1.0)
+        
         # 1. Start with the standard loss for every sample and every rule
         # Output shape: [Batch, 1]
         element_wise_loss = self.base_loss_fn(logits, labels.float())
