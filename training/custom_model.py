@@ -48,7 +48,14 @@ class CustomTransformerModel(nn.Module):
         )
         
         # The output of the Transformer's [CLS] token (used for classification)
-        cls_output = transformer_output.pooler_output
+        # Handle different transformer architectures (BERT vs DeBERTa)
+        if hasattr(transformer_output, 'pooler_output') and transformer_output.pooler_output is not None:
+            # BERT and some other models have pooler_output
+            cls_output = transformer_output.pooler_output
+        else:
+            # DeBERTa and other models use last_hidden_state with [CLS] token
+            cls_output = transformer_output.last_hidden_state[:, 0, :]  # [CLS] token (first token)
+        
         cls_output = self.dropout(cls_output)
         
         # Combine Text Embeddings and Numerical Features
