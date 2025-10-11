@@ -1,6 +1,6 @@
 import pandas as pd
 import re
-from sklearn.preprocessing import MinMaxScaler, normalize
+from sklearn.preprocessing import MinMaxScaler, normalize, RobustScaler
 from sklearn.metrics.pairwise import cosine_similarity
 
 # THIS LINE IS CRITICAL:
@@ -17,7 +17,38 @@ PROMO_CUES = r'\b(free|limited|giveaway|discount|click here|watch now|c0mpanynam
 OBFUSCATED_NAMES = r'\b(gamify|c0in|fr3e|cIick|Iink)\b' 
 
 
-# --- Helper Functions (No Change) ---
+# --- Enhanced Text Processing Functions ---
+
+def _clean_and_normalize_text(text: str) -> str:
+    """
+    Enhanced text cleaning and normalization for better feature extraction.
+    """
+    if not isinstance(text, str):
+        return ''
+    
+    # Convert to lowercase
+    text = text.lower()
+    
+    # Remove excessive whitespace and normalize
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Remove URLs but keep the fact that URLs were present
+    text = re.sub(r'https?://\S+|www\.\S+', '[URL]', text)
+    
+    # Normalize repeated characters (e.g., "soooooo" -> "sooo")
+    text = re.sub(r'(.)\1{3,}', r'\1\1\1', text)
+    
+    # Normalize punctuation
+    text = re.sub(r'[!]{2,}', '!!', text)
+    text = re.sub(r'[?]{2,}', '??', text)
+    
+    # Remove excessive punctuation but keep some for sentiment
+    text = re.sub(r'[.]{3,}', '...', text)
+    
+    # Strip leading/trailing whitespace
+    text = text.strip()
+    
+    return text
 
 def _get_exclamation_frequency(comment: str) -> float:
     """Calculates the density of exclamation marks in the comment."""
@@ -43,26 +74,39 @@ def _calculate_promo_persuasion_feature(comment: str) -> int:
 
 # --- Feature Calculation Functions (No Change) ---
 
-def calculate_simple_features(df: pd.DataFrame, scaler: MinMaxScaler = None) -> Tuple[pd.DataFrame, MinMaxScaler]:
-    """Calculates and scales continuous structural features."""
+def calculate_simple_features(df: pd.DataFrame, scaler: RobustScaler = None) -> Tuple[pd.DataFrame, RobustScaler]:
+    """Calculates and scales continuous structural features with enhanced preprocessing."""
     
+    # Enhanced text cleaning
     df['comment_text'] = df['comment_text'].astype(str).fillna('')
+    df['comment_text'] = df['comment_text'].apply(_clean_and_normalize_text)
     
-    
+    # More robust length calculation (character and word count)
     df['comment_length'] = df['comment_text'].apply(lambda x: len(x.split()))
-
+    df['comment_char_length'] = df['comment_text'].apply(lambda x: len(x))
     
+    # Enhanced exclamation frequency with better normalization
     df['exclamation_frequency'] = df['comment_text'].apply(_get_exclamation_frequency)
-
     
-    continuous_features = ['comment_length', 'exclamation_frequency']
+    # Additional text quality features
+    df['avg_word_length'] = df['comment_text'].apply(lambda x: np.mean([len(word) for word in x.split()]) if x.split() else 0)
+    df['punctuation_ratio'] = df['comment_text'].apply(lambda x: sum(1 for c in x if c in '!?.,;:') / len(x) if len(x) > 0 else 0)
+    
+    # Features to scale
+    continuous_features = ['comment_length', 'comment_char_length', 'exclamation_frequency', 'avg_word_length', 'punctuation_ratio']
+    
+    # Handle outliers and missing values
+    for feature in continuous_features:
+        # Replace infinite values with NaN
+        df[feature] = df[feature].replace([np.inf, -np.inf], np.nan)
+        # Fill NaN with median
+        df[feature] = df[feature].fillna(df[feature].median())
     
     if scaler is None:
-        
-        scaler = MinMaxScaler()
+        # Use RobustScaler for better outlier handling
+        scaler = RobustScaler()
         df[continuous_features] = scaler.fit_transform(df[continuous_features])
     else:
-    
         df[continuous_features] = scaler.transform(df[continuous_features])
     
     return df, scaler
@@ -238,7 +282,7 @@ def preprocess_data(
         # CRITICAL FIX: Ensure the function exits if no data is provided
         raise ValueError("Must provide either 'file_path' or 'df_to_process'.")
 
-    # --- Data Cleaning and Label Definition ---
+    # --- Enhanced Data Cleaning and Validation ---
     
     # CRITICAL FIX: RENAME 'body' to 'comment_text'
     if 'body' in df.columns:
@@ -247,6 +291,24 @@ def preprocess_data(
     if 'comment_text' not in df.columns:
         print(f"FATAL ERROR: Text column 'comment_text' not found. Available columns: {list(df.columns)}")
         raise KeyError('comment_text')
+    
+    # Data quality checks and validation
+    print(f"Data validation: {len(df)} rows loaded")
+    print(f"Missing values in comment_text: {df['comment_text'].isna().sum()}")
+    print(f"Empty comments: {(df['comment_text'].str.len() == 0).sum()}")
+    
+    # Remove completely empty rows
+    initial_rows = len(df)
+    df = df[df['comment_text'].str.len() > 0]
+    removed_rows = initial_rows - len(df)
+    if removed_rows > 0:
+        print(f"Removed {removed_rows} empty comment rows")
+    
+    # Validate label column
+    if 'rule_violation' in df.columns:
+        label_distribution = df['rule_violation'].value_counts()
+        print(f"Label distribution: {dict(label_distribution)}")
+        print(f"Class balance: {label_distribution[1] / len(df):.3f} positive class")
     
     # FIX: Explicitly set the label column to the one that actually exists
     LABEL_COLUMNS = ['rule_violation'] 
@@ -261,8 +323,19 @@ def preprocess_data(
     if tfidf_model is None:
         print("Fitting TFIDF and calculating mean vectors for the first time...")
         
-        # A. Fit TF-IDF
-        tfidf_params = tfidf_params if tfidf_params else {'max_features': 5000, 'stop_words': 'english', 'ngram_range': (1, 2)}
+        # A. Fit TF-IDF with optimized parameters
+        tfidf_params = tfidf_params if tfidf_params else {
+            'max_features': 8000,           # Increased for better vocabulary coverage
+            'stop_words': 'english',        # Remove common words
+            'ngram_range': (1, 3),          # Include trigrams for better context
+            'min_df': 2,                    # Ignore terms that appear in < 2 documents
+            'max_df': 0.95,                 # Ignore terms that appear in > 95% of documents
+            'sublinear_tf': True,           # Apply sublinear tf scaling (1 + log(tf))
+            'norm': 'l2',                   # L2 normalization for better similarity
+            'smooth_idf': True,             # Smooth IDF weights
+            'lowercase': True,              # Convert to lowercase
+            'strip_accents': 'unicode'      # Remove accents for better matching
+        }
         tfidf_model = TfidfVectorizer(**tfidf_params)
         X_tfidf = tfidf_model.fit_transform(df['comment_text']).toarray()
         
@@ -314,7 +387,7 @@ def preprocess_data(
     
     # 7. Final Column Selection (Fixes df_final not defined)
     columns_to_keep = ['comment_text'] + [
-        'comment_length', 'exclamation_frequency', 
+        'comment_length', 'comment_char_length', 'exclamation_frequency', 'avg_word_length', 'punctuation_ratio',
         'legal_advice_interaction_feature', 'promo_persuasion_feature', 
         'similarity_to_violation', 'similarity_to_safe', 'consistency_deviation', 'boundary_proximity_score'
     ] + LABEL_COLUMNS 

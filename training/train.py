@@ -30,7 +30,7 @@ RANDOM_SEED = 42
 
 # This list must exactly match the order of features created in data_preprocessing.py
 NUMERICAL_FEATURES = [
-    'comment_length', 'exclamation_frequency', 
+    'comment_length', 'comment_char_length', 'exclamation_frequency', 'avg_word_length', 'punctuation_ratio',
     'legal_advice_interaction_feature', 'promo_persuasion_feature', 
     'similarity_to_violation', 'similarity_to_safe', 'consistency_deviation', 'boundary_proximity_score'
 ]
