@@ -1,6 +1,7 @@
 import pandas as pd
 import re
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, normalize
+from sklearn.metrics.pairwise import cosine_similarity
 
 # THIS LINE IS CRITICAL:
 from sklearn.feature_extraction.text import TfidfVectorizer 
@@ -112,6 +113,98 @@ def calculate_similarity_features(
     df['similarity_to_violation'] = violation_similarity
     df['similarity_to_safe'] = safe_similarity
     
+    # --- NEW FEATURE: Boundary Proximity Score ---
+    if 'semantic_difference' in mean_vectors:
+        # Retrieve the difference vector
+        difference_vec = mean_vectors['semantic_difference']
+        
+        # Reshape the single difference vector for proper comparison (1 row, N features)
+        difference_vec_reshaped = difference_vec.reshape(1, -1)
+        
+        # Calculate similarity between all comments and the semantic difference vector
+        similarity_scores = cosine_similarity(X_current_tfidf, difference_vec_reshaped)
+        
+        # The final score indicates proximity to the violation concept
+        df['boundary_proximity_score'] = similarity_scores.flatten()
+        
+        print(f"Calculated boundary proximity scores for {len(df)} comments")
+    else:
+        print("Warning: semantic_difference vector not found in mean_vectors. Skipping boundary proximity score.")
+        df['boundary_proximity_score'] = 0.0
+    
+    return df
+
+def calculate_archetype_vector(texts, tfidf_model):
+    """
+    Calculate the median vector from a collection of texts using the fitted TF-IDF model.
+    This creates an archetype vector that represents the typical characteristics of the text collection.
+    """
+    if len(texts) == 0:
+        # Return zero vector if no texts provided
+        return np.zeros(tfidf_model.transform(['']).shape[1])
+    
+    # Transform texts to TF-IDF vectors
+    X_exa = tfidf_model.transform(texts)
+    X_exa_dense = X_exa.toarray()
+    
+    # Calculate median vector
+    return np.median(X_exa_dense, axis=0)
+
+def calculate_consistency_features(
+    df: pd.DataFrame, 
+    tfidf_vectorizer: TfidfVectorizer, 
+    mean_vectors: Dict[str, Any]
+) -> pd.DataFrame:
+    """
+    Calculates the consistency deviation feature by measuring how much the internal 
+    similarity of a specific row's examples deviates from the average consistency 
+    found across the entire dataset.
+    """
+    
+    # Check if the required columns exist
+    if 'positive_example_1' not in df.columns or 'positive_example_2' not in df.columns:
+        print("Warning: positive_example_1 or positive_example_2 columns not found. Skipping consistency features.")
+        return df
+    
+    # 1. Transform BOTH text columns using the FITTED tfidf_vectorizer
+    text_1 = df['positive_example_1'].fillna('')
+    text_2 = df['positive_example_2'].fillna('')
+
+    X_ex1 = tfidf_vectorizer.transform(text_1)
+    X_ex2 = tfidf_vectorizer.transform(text_2)
+
+    # 2. Normalize and compute row-wise Cosine Similarity
+    X_ex1_norm = normalize(X_ex1, norm='l2', axis=1)
+    X_ex2_norm = normalize(X_ex2, norm='l2', axis=1)
+
+    # Calculate cosine similarity between the two positive examples
+    consistency_scores = (X_ex1_norm.multiply(X_ex2_norm)).sum(axis=1)
+    df['example_consistency'] = np.asarray(consistency_scores).flatten()
+    
+    # 3. Calculate Global Statistics and Apply Scaling
+    if 'consistency_mean' not in mean_vectors:
+        # Training phase: Calculate and save the mean and standard deviation
+        consistency_mean = df['example_consistency'].mean()
+        consistency_std = df['example_consistency'].std()
+        
+        # Store these statistics in the mean_vectors dictionary
+        mean_vectors['consistency_mean'] = consistency_mean
+        mean_vectors['consistency_std'] = consistency_std
+        
+        print(f"Training: Calculated consistency_mean={consistency_mean:.4f}, consistency_std={consistency_std:.4f}")
+    else:
+        # Validation/Test phase: Load the saved mean and std dev
+        consistency_mean = mean_vectors['consistency_mean']
+        consistency_std = mean_vectors['consistency_std']
+        
+        print(f"Validation/Test: Using consistency_mean={consistency_mean:.4f}, consistency_std={consistency_std:.4f}")
+    
+    # Calculate the final feature (Z-score)
+    if consistency_std > 0:  # Avoid division by zero
+        df['consistency_deviation'] = (df['example_consistency'] - consistency_mean) / consistency_std
+    else:
+        df['consistency_deviation'] = 0.0  # If std is 0, set all values to 0
+    
     return df
 
 # --- Master Preprocessing Function (The fix is here) ---
@@ -179,18 +272,51 @@ def preprocess_data(
         MEAN_VIOLATION_VECTOR = X_tfidf[violation_mask].mean(axis=0)
         MEAN_SAFE_VECTOR = X_tfidf[~violation_mask].mean(axis=0)
         
-        mean_vectors = {'violation': MEAN_VIOLATION_VECTOR, 'safe': MEAN_SAFE_VECTOR}
+        # C. Calculate Semantic Difference Vector (Boundary Proximity Feature)
+        # Extract positive and negative example texts
+        pos_ex1_texts = df['positive_example_1'].astype(str).fillna('').tolist()
+        pos_ex2_texts = df['positive_example_2'].astype(str).fillna('').tolist()
+        neg_ex1_texts = df['negative_example_1'].astype(str).fillna('').tolist()
+        neg_ex2_texts = df['negative_example_2'].astype(str).fillna('').tolist()
+        
+        # Calculate archetype vectors for positive examples
+        ARCHETYPE_VECTOR_1 = calculate_archetype_vector(pos_ex1_texts, tfidf_model)
+        ARCHETYPE_VECTOR_2 = calculate_archetype_vector(pos_ex2_texts, tfidf_model)
+        
+        # Calculate median positive vector (average of the two positive archetypes)
+        MEDIAN_POSITIVE_VECTOR = (ARCHETYPE_VECTOR_1 + ARCHETYPE_VECTOR_2) / 2
+        
+        # Calculate archetype vectors for negative examples
+        ARCHETYPE_NEG_VECTOR_1 = calculate_archetype_vector(neg_ex1_texts, tfidf_model)
+        ARCHETYPE_NEG_VECTOR_2 = calculate_archetype_vector(neg_ex2_texts, tfidf_model)
+        
+        # Calculate median negative vector (average of the two negative archetypes)
+        MEDIAN_NEGATIVE_VECTOR = (ARCHETYPE_NEG_VECTOR_1 + ARCHETYPE_NEG_VECTOR_2) / 2
+        
+        # CRITICAL STEP: The Semantic Difference Vector
+        SEMANTIC_DIFFERENCE_VECTOR = MEDIAN_POSITIVE_VECTOR - MEDIAN_NEGATIVE_VECTOR
+        
+        mean_vectors = {
+            'violation': MEAN_VIOLATION_VECTOR, 
+            'safe': MEAN_SAFE_VECTOR,
+            'semantic_difference': SEMANTIC_DIFFERENCE_VECTOR
+        }
+        
+        print(f"Training: Calculated semantic difference vector with shape {SEMANTIC_DIFFERENCE_VECTOR.shape}")
         
     # 5. Calculate Similarity Features (For all datasets)
     # This line now works for both cases because tfidf_model and mean_vectors 
     # are guaranteed to be defined (either passed in or calculated in Step 4)
     df = calculate_similarity_features(df, tfidf_model, mean_vectors)
     
-    # 6. Final Column Selection (Fixes df_final not defined)
+    # 6. Calculate Consistency Features (Global Consistency Feature)
+    df = calculate_consistency_features(df, tfidf_model, mean_vectors)
+    
+    # 7. Final Column Selection (Fixes df_final not defined)
     columns_to_keep = ['comment_text'] + [
         'comment_length', 'exclamation_frequency', 
         'legal_advice_interaction_feature', 'promo_persuasion_feature', 
-        'similarity_to_violation', 'similarity_to_safe'
+        'similarity_to_violation', 'similarity_to_safe', 'consistency_deviation', 'boundary_proximity_score'
     ] + LABEL_COLUMNS 
 
     # CRITICAL FIX: Define df_final before returning it

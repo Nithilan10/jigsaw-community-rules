@@ -18,11 +18,11 @@ from custom_loss import CustomCostSensitiveLoss
 
 # --- 0. Configuration and Constants ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-TRANSFORMER_MODEL_NAME = 'bert-base-uncased'
+TRANSFORMER_MODEL_NAME = 'microsoft/deberta-base'  # DeBERTa-base (184M parameters)
 TRAIN_FILE_PATH = '../data/train.csv' # Use the actual file name
 NUM_RULES = 1  # IMPORTANT: Set this to your actual number of policy columns
-BATCH_SIZE = 16
-LEARNING_RATE = 1e-5
+BATCH_SIZE = 8  # Reduced for DeBERTa (larger model)
+LEARNING_RATE = 2e-5  # Slightly higher for DeBERTa
 NUM_EPOCHS = 3
 MAX_SEQ_LENGTH = 256
 VALIDATION_SPLIT_RATIO = 0.15
@@ -32,7 +32,7 @@ RANDOM_SEED = 42
 NUMERICAL_FEATURES = [
     'comment_length', 'exclamation_frequency', 
     'legal_advice_interaction_feature', 'promo_persuasion_feature', 
-    'similarity_to_violation', 'similarity_to_safe'
+    'similarity_to_violation', 'similarity_to_safe', 'consistency_deviation', 'boundary_proximity_score'
 ]
 NUM_NUMERICAL_FEATURES = len(NUMERICAL_FEATURES)
 
