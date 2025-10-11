@@ -323,18 +323,17 @@ def preprocess_data(
     if tfidf_model is None:
         print("Fitting TFIDF and calculating mean vectors for the first time...")
         
-        # A. Fit TF-IDF with optimized parameters
+        # A. Fit TF-IDF with proven parameters
         tfidf_params = tfidf_params if tfidf_params else {
-            'max_features': 8000,           # Increased for better vocabulary coverage
+            'max_features': 5000,           # Back to original size
             'stop_words': 'english',        # Remove common words
-            'ngram_range': (1, 3),          # Include trigrams for better context
-            'min_df': 2,                    # Ignore terms that appear in < 2 documents
-            'max_df': 0.95,                 # Ignore terms that appear in > 95% of documents
-            'sublinear_tf': True,           # Apply sublinear tf scaling (1 + log(tf))
-            'norm': 'l2',                   # L2 normalization for better similarity
-            'smooth_idf': True,             # Smooth IDF weights
+            'ngram_range': (1, 2),          # Back to bigrams
+            'min_df': 1,                    # Less restrictive
+            'max_df': 1.0,                  # Less restrictive
+            'sublinear_tf': False,          # Disable sublinear scaling
+            'norm': 'l2',                   # Keep L2 normalization
+            'smooth_idf': True,             # Keep smooth IDF
             'lowercase': True,              # Convert to lowercase
-            'strip_accents': 'unicode'      # Remove accents for better matching
         }
         tfidf_model = TfidfVectorizer(**tfidf_params)
         X_tfidf = tfidf_model.fit_transform(df['comment_text']).toarray()
@@ -387,7 +386,7 @@ def preprocess_data(
     
     # 7. Final Column Selection (Fixes df_final not defined)
     columns_to_keep = ['comment_text'] + [
-        'comment_length', 'comment_char_length', 'exclamation_frequency', 'avg_word_length', 'punctuation_ratio',
+        'comment_length', 'exclamation_frequency', 
         'legal_advice_interaction_feature', 'promo_persuasion_feature', 
         'similarity_to_violation', 'similarity_to_safe', 'consistency_deviation', 'boundary_proximity_score'
     ] + LABEL_COLUMNS 
