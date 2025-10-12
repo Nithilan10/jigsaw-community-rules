@@ -725,13 +725,20 @@ def train_with_hyperparameter_tuning():
             # Record result
             tuner.add_trial_result(params, auc)
             
-            print(f"Trial {trial + 1} Test AUC: {auc:.4f}")
-            
-            if auc > best_auc:
-                best_auc = auc
-                best_params = params.copy()
-                print(f"🎯 NEW BEST TEST AUC: {best_auc:.4f}")
-                print(f"Best parameters: {best_params}")
+            if 'rule_violation' in test_df_processed.columns:
+                print(f"Trial {trial + 1} Test AUC: {auc:.4f}")
+                if auc > best_auc:
+                    best_auc = auc
+                    best_params = params.copy()
+                    print(f"🎯 NEW BEST TEST AUC: {best_auc:.4f}")
+                    print(f"Best parameters: {best_params}")
+            else:
+                print(f"Trial {trial + 1} Validation AUC: {auc:.4f}")
+                if auc > best_auc:
+                    best_auc = auc
+                    best_params = params.copy()
+                    print(f"🎯 NEW BEST VALIDATION AUC: {best_auc:.4f}")
+                    print(f"Best parameters: {best_params}")
             
         except Exception as e:
             print(f"Trial {trial + 1} failed: {e}")
@@ -740,7 +747,10 @@ def train_with_hyperparameter_tuning():
     print(f"\n{'='*60}")
     print("HYPERPARAMETER TUNING COMPLETE")
     print(f"{'='*60}")
-    print(f"Best Test AUC: {best_auc:.4f}")
+    if 'rule_violation' in test_df_processed.columns:
+        print(f"Best Test AUC: {best_auc:.4f}")
+    else:
+        print(f"Best Validation AUC: {best_auc:.4f}")
     print(f"Best parameters: {best_params}")
     
     # Save best parameters
@@ -861,11 +871,15 @@ def train_single_trial(params: dict, train_df: pd.DataFrame, validation_df: pd.D
         if validation_auc > best_auc:
             best_auc = validation_auc
     
-    # Final evaluation on test set
-    test_auc, _ = evaluate_model(model, test_dataloader, DEVICE)
-    print(f"    Final Test AUC: {test_auc:.4f}")
-    
-    return test_auc
+    # Final evaluation on test set (only if test data has labels)
+    if 'rule_violation' in test_df.columns:
+        test_auc, _ = evaluate_model(model, test_dataloader, DEVICE)
+        print(f"    Final Test AUC: {test_auc:.4f}")
+        return test_auc
+    else:
+        # If test data has no labels, use validation AUC as final score
+        print(f"    Test data has no labels, using validation AUC: {best_auc:.4f}")
+        return best_auc
 
 # --- Ensemble Training Functions ---
 

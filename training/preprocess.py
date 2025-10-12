@@ -385,11 +385,17 @@ def preprocess_data(
     df = calculate_consistency_features(df, tfidf_model, mean_vectors)
     
     # 7. Final Column Selection (Fixes df_final not defined)
-    columns_to_keep = ['comment_text'] + [
+    base_columns = ['comment_text'] + [
         'comment_length', 'exclamation_frequency', 
         'legal_advice_interaction_feature', 'promo_persuasion_feature', 
         'similarity_to_violation', 'similarity_to_safe', 'consistency_deviation', 'boundary_proximity_score'
-    ] + LABEL_COLUMNS 
+    ]
+    
+    # Add label columns only if they exist (for test data without labels)
+    columns_to_keep = base_columns.copy()
+    for label_col in LABEL_COLUMNS:
+        if label_col in df.columns:
+            columns_to_keep.append(label_col)
 
     # CRITICAL FIX: Define df_final before returning it
     df_final = df[columns_to_keep] 
