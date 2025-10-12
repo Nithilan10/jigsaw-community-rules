@@ -669,6 +669,125 @@ def train_ensemble():
     
     print(f"\nEnsemble training complete!")
     print(f"Configuration saved to models/ensemble_config.json")
+    
+    # Evaluate ensemble performance
+    print(f"\n{'='*60}")
+    print("EVALUATING ENSEMBLE PERFORMANCE")
+    print(f"{'='*60}")
+    
+    ensemble_auc = evaluate_ensemble(ensemble_weights, validation_df_processed, tfidf_model, mean_vectors, scaler)
+    print(f"Final Ensemble AUC: {ensemble_auc:.4f}")
+    
+    return ensemble_auc
+
+def evaluate_ensemble(ensemble_weights: dict, validation_df: pd.DataFrame, 
+                     tfidf_model, mean_vectors, scaler) -> float:
+    """
+    Evaluate ensemble performance by combining predictions from all models.
+    
+    Args:
+        ensemble_weights: Dictionary of model weights
+        validation_df: Validation dataset
+        tfidf_model: Fitted TF-IDF model
+        mean_vectors: Mean vectors for similarity features
+        scaler: Fitted scaler
+        
+    Returns:
+        Ensemble AUC score
+    """
+    print("Loading trained models for ensemble evaluation...")
+    
+    # Load all trained models
+    models = {}
+    for model_name, model_config in ENSEMBLE_MODELS.items():
+        try:
+            # Create model
+            model = CustomTransformerModel(
+                transformer_name=model_config['name'],
+                num_numerical_features=NUM_NUMERICAL_FEATURES,
+                num_rules=NUM_RULES
+            ).to(DEVICE)
+            
+            # Load trained weights
+            model_path = f'models/{model_name}_best.pth'
+            model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+            model.eval()
+            
+            models[model_name] = model
+            print(f"  ✓ Loaded {model_name}")
+            
+        except Exception as e:
+            print(f"  ✗ Failed to load {model_name}: {e}")
+            continue
+    
+    if not models:
+        print("ERROR: No models loaded for ensemble evaluation!")
+        return 0.0
+    
+    # Create validation dataset
+    tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL_NAME)
+    validation_dataset = ToxicityDataset(validation_df, tokenizer)
+    validation_dataloader = DataLoader(validation_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    
+    print(f"Evaluating ensemble with {len(models)} models...")
+    
+    # Collect predictions from all models
+    all_model_predictions = {}
+    all_labels = []
+    
+    for model_name, model in models.items():
+        print(f"  Getting predictions from {model_name}...")
+        model_predictions = []
+        
+        with torch.no_grad():
+            for batch in validation_dataloader:
+                # Move data to device
+                input_ids = batch['input_ids'].to(DEVICE)
+                attention_mask = batch['attention_mask'].to(DEVICE)
+                numerical_features = batch['numerical_features'].to(DEVICE)
+                
+                # Forward pass
+                logits = model(input_ids, attention_mask, numerical_features)
+                
+                # Convert to probabilities
+                probs = torch.sigmoid(logits).cpu().numpy()
+                model_predictions.append(probs)
+                
+                # Store labels (only need to do this once)
+                if model_name == list(models.keys())[0]:
+                    all_labels.append(batch['labels'].cpu().numpy())
+        
+        # Concatenate all predictions for this model
+        all_model_predictions[model_name] = np.concatenate(model_predictions, axis=0)
+    
+    # Concatenate all labels
+    all_labels = np.concatenate(all_labels, axis=0)
+    
+    # Calculate ensemble predictions
+    print("Calculating ensemble predictions...")
+    ensemble_predictions = np.zeros_like(all_model_predictions[list(models.keys())[0]])
+    
+    for model_name, predictions in all_model_predictions.items():
+        weight = ensemble_weights.get(model_name, 0.0)
+        ensemble_predictions += weight * predictions
+        print(f"  {model_name}: weight={weight:.4f}, predictions shape={predictions.shape}")
+    
+    # Calculate ensemble AUC
+    try:
+        ensemble_auc = roc_auc_score(all_labels, ensemble_predictions)
+        print(f"Ensemble AUC: {ensemble_auc:.4f}")
+        
+        # Compare with individual models
+        print(f"\nIndividual Model AUCs:")
+        for model_name, predictions in all_model_predictions.items():
+            individual_auc = roc_auc_score(all_labels, predictions)
+            print(f"  {model_name}: {individual_auc:.4f}")
+        
+        return ensemble_auc
+        
+    except Exception as e:
+        print(f"ERROR calculating ensemble AUC: {e}")
+        return 0.0
 
 # --- SPD Training Functions ---
 
