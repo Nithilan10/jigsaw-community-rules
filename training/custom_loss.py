@@ -335,7 +335,10 @@ class CustomCostSensitiveLoss(_Loss):
             feature_boost += boost
             
         # Add a small base weight (1.0) and the calculated feature boost
-        final_weight = (1.0 + feature_boost).unsqueeze(1).expand_as(element_wise_loss) 
+        # Ensure feature_boost has the same shape as element_wise_loss
+        if feature_boost.dim() == 1:
+            feature_boost = feature_boost.unsqueeze(1)
+        final_weight = (1.0 + feature_boost) 
         
         # 4. Final Weighted Loss Calculation
         # The total loss is: Rule_Weight * Final_Weight * Base_Loss
