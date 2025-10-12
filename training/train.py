@@ -724,11 +724,6 @@ def evaluate_ensemble(ensemble_weights: dict, validation_df: pd.DataFrame,
         print("ERROR: No models loaded for ensemble evaluation!")
         return 0.0
     
-    # Create validation dataset
-    tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL_NAME)
-    validation_dataset = ToxicityDataset(validation_df, tokenizer)
-    validation_dataloader = DataLoader(validation_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-    
     print(f"Evaluating ensemble with {len(models)} models...")
     
     # Collect predictions from all models
@@ -737,35 +732,61 @@ def evaluate_ensemble(ensemble_weights: dict, validation_df: pd.DataFrame,
     
     for model_name, model in models.items():
         print(f"  Getting predictions from {model_name}...")
+        
+        # Create dataset with model-specific tokenizer
+        model_config = ENSEMBLE_MODELS[model_name]
+        tokenizer = AutoTokenizer.from_pretrained(model_config['name'])
+        validation_dataset = ToxicityDataset(validation_df, tokenizer)
+        validation_dataloader = DataLoader(validation_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+        
         model_predictions = []
         
         with torch.no_grad():
             for batch in validation_dataloader:
-                # Move data to device
-                input_ids = batch['input_ids'].to(DEVICE)
-                attention_mask = batch['attention_mask'].to(DEVICE)
-                numerical_features = batch['numerical_features'].to(DEVICE)
-                
-                # Forward pass
-                logits = model(input_ids, attention_mask, numerical_features)
-                
-                # Convert to probabilities
-                probs = torch.sigmoid(logits).cpu().numpy()
-                model_predictions.append(probs)
-                
-                # Store labels (only need to do this once)
-                if model_name == list(models.keys())[0]:
-                    all_labels.append(batch['labels'].cpu().numpy())
+                try:
+                    # Move data to device
+                    input_ids = batch['input_ids'].to(DEVICE)
+                    attention_mask = batch['attention_mask'].to(DEVICE)
+                    numerical_features = batch['numerical_features'].to(DEVICE)
+                    
+                    # Forward pass
+                    logits = model(input_ids, attention_mask, numerical_features)
+                    
+                    # Convert to probabilities
+                    probs = torch.sigmoid(logits).cpu().numpy()
+                    model_predictions.append(probs)
+                    
+                    # Store labels (only need to do this once)
+                    if model_name == list(models.keys())[0]:
+                        all_labels.append(batch['labels'].cpu().numpy())
+                    
+                    # Clear CUDA cache to prevent memory issues
+                    if DEVICE.type == 'cuda':
+                        torch.cuda.empty_cache()
+                        
+                except Exception as e:
+                    print(f"    Error processing batch for {model_name}: {e}")
+                    continue
         
         # Concatenate all predictions for this model
-        all_model_predictions[model_name] = np.concatenate(model_predictions, axis=0)
+        if model_predictions:
+            all_model_predictions[model_name] = np.concatenate(model_predictions, axis=0)
+            print(f"    ✓ {model_name}: {len(model_predictions)} batches processed")
+        else:
+            print(f"    ✗ {model_name}: No predictions generated")
     
     # Concatenate all labels
     all_labels = np.concatenate(all_labels, axis=0)
     
+    # Check if we have valid predictions
+    if not all_model_predictions:
+        print("ERROR: No valid model predictions for ensemble evaluation!")
+        return 0.0
+    
     # Calculate ensemble predictions
     print("Calculating ensemble predictions...")
-    ensemble_predictions = np.zeros_like(all_model_predictions[list(models.keys())[0]])
+    first_model_name = list(all_model_predictions.keys())[0]
+    ensemble_predictions = np.zeros_like(all_model_predictions[first_model_name])
     
     for model_name, predictions in all_model_predictions.items():
         weight = ensemble_weights.get(model_name, 0.0)
@@ -787,6 +808,8 @@ def evaluate_ensemble(ensemble_weights: dict, validation_df: pd.DataFrame,
         
     except Exception as e:
         print(f"ERROR calculating ensemble AUC: {e}")
+        print(f"Labels shape: {all_labels.shape}")
+        print(f"Ensemble predictions shape: {ensemble_predictions.shape}")
         return 0.0
 
 # --- SPD Training Functions ---
