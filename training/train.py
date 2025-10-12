@@ -7,10 +7,13 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
-from typing import Dict, Any, Tuple
+from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
+from sklearn.metrics import roc_auc_score, make_scorer
+from typing import Dict, Any, Tuple, List
 from torch.cuda.amp import autocast, GradScaler
+import itertools
+import random
+from collections import Counter
 
 # Import custom modules
 # NOTE: The import below assumes your data_preprocessing file is named 'preprocess.py'
@@ -20,8 +23,9 @@ from custom_loss import CustomCostSensitiveLoss, SGDAOptimizer, OGDAOptimizer, R
 
 # --- 0. Configuration and Constants ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-TRANSFORMER_MODEL_NAME = 'microsoft/deberta-v3-base'  # DeBERTa-v3-base (184M parameters, better performance)
+TRANSFORMER_MODEL_NAME = 'bert-base-uncased'  # BERT-base (best performer in your ensemble)
 TRAIN_FILE_PATH = '../data/train.csv' # Use the actual file name
+TEST_FILE_PATH = '../data/test.csv'   # Test file for final evaluation
 NUM_RULES = 1  # IMPORTANT: Set this to your actual number of policy columns
 BATCH_SIZE = 8  # Balanced for DeBERTa-v3 (larger model needs more data per batch)
 LEARNING_RATE = 1e-5  # Base learning rate (will be scheduled)
@@ -39,8 +43,32 @@ EARLY_STOPPING_PATIENCE = 3         # Stop if no improvement for 3 epochs
 GRADIENT_CLIP_NORM = 1.0           # Max gradient norm
 WARMUP_RATIO = 0.1                 # 10% of training for warmup
 
+# Hyperparameter Tuning Configuration
+HYPERPARAMETER_TUNING = True       # Set to True to enable hyperparameter tuning
+TUNING_MODE = 'random'             # Options: 'grid', 'random', 'bayesian'
+MAX_TUNING_TRIALS = 20             # Maximum number of trials for random/bayesian search
+TUNING_CV_FOLDS = 3                # Cross-validation folds for tuning
+
+# Hyperparameter Search Spaces
+HYPERPARAMETER_SPACES = {
+    'learning_rate': [1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5],
+    'batch_size': [4, 6, 8, 10, 12, 16],
+    'num_epochs': [3, 4, 5, 6, 7, 8],
+    'weight_decay': [0.0, 0.01, 0.05, 0.1, 0.2],
+    'dropout_rate': [0.1, 0.15, 0.2, 0.25, 0.3],
+    'warmup_ratio': [0.05, 0.1, 0.15, 0.2],
+    'gradient_clip_norm': [0.5, 1.0, 1.5, 2.0]
+}
+
+# Class Imbalance Handling
+USE_CLASS_WEIGHTING = True         # Enable class weighting
+USE_FOCAL_LOSS = True              # Enable focal loss for class imbalance
+USE_SMOTE = False                  # Enable SMOTE (synthetic minority oversampling)
+FOCAL_LOSS_ALPHA = 0.25            # Focal loss alpha parameter
+FOCAL_LOSS_GAMMA = 2.0             # Focal loss gamma parameter
+
 # Ensemble configuration
-ENSEMBLE_MODE = True  # Set to True to train multiple models
+ENSEMBLE_MODE = False  # Set to True to train multiple models
 
 # SPD (Stochastic Primal-Dual) configuration
 SPD_MODE = False  # Set to True to use SPD optimization
@@ -129,6 +157,116 @@ class EarlyStopping:
                 self.stopped_epoch = self.wait
                 return True  # Stop training
             return False  # Continue training
+
+class HyperparameterTuner:
+    """
+    Hyperparameter tuning utility for transformer models.
+    """
+    def __init__(self, search_space: dict, mode: str = 'random', max_trials: int = 20):
+        self.search_space = search_space
+        self.mode = mode
+        self.max_trials = max_trials
+        self.trial_results = []
+        
+    def generate_hyperparameters(self) -> dict:
+        """Generate hyperparameters based on search mode."""
+        if self.mode == 'grid':
+            return self._grid_search()
+        elif self.mode == 'random':
+            return self._random_search()
+        else:
+            raise ValueError(f"Unknown search mode: {self.mode}")
+    
+    def _random_search(self) -> dict:
+        """Generate random hyperparameters from search space."""
+        params = {}
+        for param_name, param_values in self.search_space.items():
+            params[param_name] = random.choice(param_values)
+        return params
+    
+    def _grid_search(self) -> dict:
+        """Generate hyperparameters using grid search."""
+        # This would be more complex for full grid search
+        # For now, return random search
+        return self._random_search()
+    
+    def add_trial_result(self, params: dict, score: float):
+        """Add a trial result."""
+        self.trial_results.append({
+            'params': params,
+            'score': score
+        })
+    
+    def get_best_params(self) -> dict:
+        """Get the best hyperparameters found so far."""
+        if not self.trial_results:
+            return {}
+        
+        best_trial = max(self.trial_results, key=lambda x: x['score'])
+        return best_trial['params']
+
+def calculate_class_weights(labels: np.ndarray) -> dict:
+    """
+    Calculate class weights for handling class imbalance.
+    
+    Args:
+        labels: Array of class labels
+        
+    Returns:
+        Dictionary of class weights
+    """
+    class_counts = Counter(labels)
+    total_samples = len(labels)
+    num_classes = len(class_counts)
+    
+    # Calculate weights inversely proportional to class frequency
+    weights = {}
+    for class_id, count in class_counts.items():
+        weights[class_id] = total_samples / (num_classes * count)
+    
+    return weights
+
+def apply_smote_oversampling(X_text: list, X_numerical: np.ndarray, y: np.ndarray) -> tuple:
+    """
+    Apply SMOTE oversampling to handle class imbalance.
+    
+    Args:
+        X_text: List of text samples
+        X_numerical: Numerical features
+        y: Labels
+        
+    Returns:
+        Oversampled data
+    """
+    try:
+        from imblearn.over_sampling import SMOTE
+        
+        # Combine numerical features for SMOTE
+        # Note: SMOTE works on numerical features, not text
+        smote = SMOTE(random_state=RANDOM_SEED, k_neighbors=3)
+        X_numerical_resampled, y_resampled = smote.fit_resample(X_numerical, y)
+        
+        # For text, we'll duplicate samples (not ideal but necessary)
+        # In practice, you'd want more sophisticated text augmentation
+        X_text_resampled = []
+        for i, label in enumerate(y_resampled):
+            if i < len(X_text):
+                X_text_resampled.append(X_text[i])
+            else:
+                # Find a sample with the same label to duplicate
+                same_label_indices = np.where(y == label)[0]
+                if len(same_label_indices) > 0:
+                    idx = np.random.choice(same_label_indices)
+                    X_text_resampled.append(X_text[idx])
+                else:
+                    X_text_resampled.append(X_text[0])  # Fallback
+        
+        print(f"SMOTE applied: {len(y)} -> {len(y_resampled)} samples")
+        return X_text_resampled, X_numerical_resampled, y_resampled
+        
+    except ImportError:
+        print("SMOTE not available. Install imbalanced-learn: pip install imbalanced-learn")
+        return X_text, X_numerical, y
 
 # --- 2. Custom Dataset Class (No changes needed here) ---
 
@@ -453,6 +591,281 @@ def train_model():
                 break
     
     print(f"\nTraining complete. Best validation AUC: {best_auc:.4f}")
+
+def train_with_hyperparameter_tuning():
+    """
+    Train model with hyperparameter tuning.
+    """
+    print("Starting Hyperparameter Tuning")
+    print("="*60)
+    
+    # Load and preprocess data
+    try:
+        print(f"Loading data from: {TRAIN_FILE_PATH}")
+        full_train_df = pd.read_csv(TRAIN_FILE_PATH)
+        print(f"Data loaded successfully. Shape: {full_train_df.shape}")
+    except FileNotFoundError:
+        print(f"FATAL ERROR: '{TRAIN_FILE_PATH}' not found.")
+        return
+    except Exception as e:
+        print(f"FATAL ERROR loading data: {e}")
+        return
+    
+    # Split data
+    if 'rule_violation' in full_train_df.columns:
+        stratify_col = full_train_df['rule_violation']
+    else:
+        label_columns = full_train_df.filter(regex='rule_').columns.tolist()
+        stratify_col = full_train_df[label_columns].sum(axis=1) if label_columns else None
+    
+    train_df_raw, validation_df_raw = train_test_split(
+        full_train_df,
+        test_size=VALIDATION_SPLIT_RATIO,
+        random_state=RANDOM_SEED,
+        stratify=stratify_col
+    )
+    
+    print(f"Dataset split: Train={len(train_df_raw)} samples, Validation={len(validation_df_raw)} samples")
+    
+    # Preprocess data
+    print("\nPreprocessing data...")
+    train_df_processed, tfidf_model, mean_vectors, scaler = preprocess_data(
+        file_path=None,
+        df_to_process=train_df_raw
+    )
+    
+    validation_df_processed, _, _, _ = preprocess_data(
+        file_path=None,
+        df_to_process=validation_df_raw,
+        tfidf_model=tfidf_model,
+        mean_vectors=mean_vectors,
+        scaler=scaler
+    )
+    
+    # Load test data
+    try:
+        print(f"Loading test data from: {TEST_FILE_PATH}")
+        test_df_raw = pd.read_csv(TEST_FILE_PATH)
+        print(f"Test data loaded successfully. Shape: {test_df_raw.shape}")
+    except FileNotFoundError:
+        print(f"WARNING: '{TEST_FILE_PATH}' not found. Using validation set for evaluation.")
+        test_df_raw = validation_df_raw
+    except Exception as e:
+        print(f"WARNING: Error loading test data: {e}. Using validation set for evaluation.")
+        test_df_raw = validation_df_raw
+    
+    test_df_processed, _, _, _ = preprocess_data(
+        file_path=None,
+        df_to_process=test_df_raw,
+        tfidf_model=tfidf_model,
+        mean_vectors=mean_vectors,
+        scaler=scaler
+    )
+    
+    # Apply class imbalance handling if enabled
+    if USE_SMOTE:
+        print("\nApplying SMOTE oversampling...")
+        X_text = train_df_processed['comment_text'].tolist()
+        X_numerical = train_df_processed[NUMERICAL_FEATURES].values
+        y = train_df_processed['rule_violation'].values
+        
+        X_text_resampled, X_numerical_resampled, y_resampled = apply_smote_oversampling(X_text, X_numerical, y)
+        
+        # Recreate DataFrame
+        train_df_processed = pd.DataFrame({
+            'comment_text': X_text_resampled,
+            'rule_violation': y_resampled
+        })
+        # Add numerical features
+        for i, feature in enumerate(NUMERICAL_FEATURES):
+            train_df_processed[feature] = X_numerical_resampled[:, i]
+    
+    # Calculate class weights
+    class_weights = None
+    if USE_CLASS_WEIGHTING:
+        labels = train_df_processed['rule_violation'].values
+        class_weights = calculate_class_weights(labels)
+        print(f"Class weights calculated: {class_weights}")
+    
+    # Initialize hyperparameter tuner
+    tuner = HyperparameterTuner(
+        search_space=HYPERPARAMETER_SPACES,
+        mode=TUNING_MODE,
+        max_trials=MAX_TUNING_TRIALS
+    )
+    
+    print(f"\nStarting hyperparameter tuning with {TUNING_MODE} search...")
+    print(f"Maximum trials: {MAX_TUNING_TRIALS}")
+    
+    best_auc = 0.0
+    best_params = {}
+    
+    for trial in range(MAX_TUNING_TRIALS):
+        print(f"\n{'='*50}")
+        print(f"TRIAL {trial + 1}/{MAX_TUNING_TRIALS}")
+        print(f"{'='*50}")
+        
+        # Generate hyperparameters
+        params = tuner.generate_hyperparameters()
+        print(f"Trial parameters: {params}")
+        
+        try:
+            # Train model with these hyperparameters
+            auc = train_single_trial(
+                params, 
+                train_df_processed, 
+                validation_df_processed, 
+                test_df_processed,
+                tfidf_model, 
+                mean_vectors, 
+                scaler,
+                class_weights
+            )
+            
+            # Record result
+            tuner.add_trial_result(params, auc)
+            
+            print(f"Trial {trial + 1} Test AUC: {auc:.4f}")
+            
+            if auc > best_auc:
+                best_auc = auc
+                best_params = params.copy()
+                print(f"🎯 NEW BEST TEST AUC: {best_auc:.4f}")
+                print(f"Best parameters: {best_params}")
+            
+        except Exception as e:
+            print(f"Trial {trial + 1} failed: {e}")
+            continue
+    
+    print(f"\n{'='*60}")
+    print("HYPERPARAMETER TUNING COMPLETE")
+    print(f"{'='*60}")
+    print(f"Best Test AUC: {best_auc:.4f}")
+    print(f"Best parameters: {best_params}")
+    
+    # Save best parameters
+    import json
+    with open('best_hyperparameters.json', 'w') as f:
+        json.dump(best_params, f, indent=2)
+    
+    print(f"Best hyperparameters saved to best_hyperparameters.json")
+    
+    return best_params, best_auc
+
+def train_single_trial(params: dict, train_df: pd.DataFrame, validation_df: pd.DataFrame, test_df: pd.DataFrame,
+                      tfidf_model, mean_vectors, scaler, class_weights: dict = None) -> float:
+    """
+    Train a single model with given hyperparameters.
+    
+    Args:
+        params: Hyperparameters for this trial
+        train_df: Training data
+        validation_df: Validation data (for early stopping)
+        test_df: Test data (for final evaluation)
+        tfidf_model: Fitted TF-IDF model
+        mean_vectors: Mean vectors
+        scaler: Fitted scaler
+        class_weights: Class weights for loss function
+        
+    Returns:
+        Test AUC for this trial
+    """
+    # Create datasets
+    tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL_NAME)
+    train_dataset = ToxicityDataset(train_df, tokenizer)
+    validation_dataset = ToxicityDataset(validation_df, tokenizer)
+    test_dataset = ToxicityDataset(test_df, tokenizer)
+    
+    train_dataloader = DataLoader(
+        train_dataset, 
+        batch_size=params.get('batch_size', BATCH_SIZE), 
+        shuffle=True, 
+        num_workers=0
+    )
+    validation_dataloader = DataLoader(
+        validation_dataset, 
+        batch_size=params.get('batch_size', BATCH_SIZE), 
+        shuffle=False, 
+        num_workers=0
+    )
+    test_dataloader = DataLoader(
+        test_dataset, 
+        batch_size=params.get('batch_size', BATCH_SIZE), 
+        shuffle=False, 
+        num_workers=0
+    )
+    
+    # Initialize model
+    model = CustomTransformerModel(
+        transformer_name=TRANSFORMER_MODEL_NAME,
+        num_numerical_features=NUM_NUMERICAL_FEATURES,
+        num_rules=NUM_RULES
+    ).to(DEVICE)
+    
+    # Initialize loss function with class weights
+    if USE_FOCAL_LOSS:
+        from custom_loss import FocalLoss
+        base_loss_fn = FocalLoss(alpha=FOCAL_LOSS_ALPHA, gamma=FOCAL_LOSS_GAMMA)
+    else:
+        base_loss_fn = None
+    
+    criterion = CustomCostSensitiveLoss(
+        rule_weights=RULE_WEIGHTS,
+        feature_weights=FEATURE_WEIGHTS,
+        base_loss_fn=base_loss_fn
+    )
+    
+    # Initialize optimizer
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=params.get('learning_rate', LEARNING_RATE),
+        weight_decay=params.get('weight_decay', 0.01)
+    )
+    
+    # Training loop
+    num_epochs = params.get('num_epochs', NUM_EPOCHS)
+    best_auc = 0.0
+    
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        
+        for batch in train_dataloader:
+            input_ids = batch['input_ids'].to(DEVICE)
+            attention_mask = batch['attention_mask'].to(DEVICE)
+            numerical_features = batch['numerical_features'].to(DEVICE)
+            labels = batch['labels'].to(DEVICE)
+            
+            optimizer.zero_grad()
+            
+            # Forward pass
+            logits = model(input_ids, attention_mask, numerical_features)
+            loss = criterion(logits, labels, numerical_features)
+            
+            # Backward pass
+            loss.backward()
+            
+            # Gradient clipping
+            if USE_GRADIENT_CLIPPING:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), 
+                    params.get('gradient_clip_norm', GRADIENT_CLIP_NORM)
+                )
+            
+            optimizer.step()
+            total_loss += loss.item()
+        
+        # Validation (for early stopping)
+        validation_auc, _ = evaluate_model(model, validation_dataloader, DEVICE)
+        
+        if validation_auc > best_auc:
+            best_auc = validation_auc
+    
+    # Final evaluation on test set
+    test_auc, _ = evaluate_model(model, test_dataloader, DEVICE)
+    print(f"    Final Test AUC: {test_auc:.4f}")
+    
+    return test_auc
 
 # --- Ensemble Training Functions ---
 
@@ -970,7 +1383,9 @@ def train_with_spd():
 
 # --- Execute Script ---
 if __name__ == '__main__':
-    if ENSEMBLE_MODE:
+    if HYPERPARAMETER_TUNING:
+        train_with_hyperparameter_tuning()
+    elif ENSEMBLE_MODE:
         train_ensemble()
     elif SPD_MODE:
         train_with_spd()

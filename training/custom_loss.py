@@ -9,6 +9,64 @@ import torch.nn.functional as F
 # NOTE: The NUM_RULES constant is removed here. The logic now relies on the 
 # configuration being passed via rule_weights, which should only use index 0.
 
+# --- Focal Loss for Class Imbalance ---
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance.
+    
+    Focal Loss = -α(1-p_t)^γ * log(p_t)
+    where p_t is the predicted probability for the true class.
+    """
+    
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = 'mean'):
+        """
+        Initialize Focal Loss.
+        
+        Args:
+            alpha: Weighting factor for rare class (default: 0.25)
+            gamma: Focusing parameter (default: 2.0)
+            reduction: Reduction method ('mean', 'sum', 'none')
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of Focal Loss.
+        
+        Args:
+            inputs: Model predictions (logits)
+            targets: True labels
+            
+        Returns:
+            Focal loss value
+        """
+        # Convert logits to probabilities
+        probs = torch.sigmoid(inputs)
+        
+        # Calculate p_t (probability for true class)
+        p_t = probs * targets + (1 - probs) * (1 - targets)
+        
+        # Calculate focal weight
+        focal_weight = self.alpha * (1 - p_t) ** self.gamma
+        
+        # Calculate binary cross entropy
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        
+        # Apply focal weight
+        focal_loss = focal_weight * bce_loss
+        
+        # Apply reduction
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
 # --- Stochastic Primal-Dual (SPD) Optimizers ---
 
 class SGDAOptimizer:
