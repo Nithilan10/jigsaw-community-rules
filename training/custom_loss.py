@@ -4,9 +4,183 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.loss import _Loss
 from typing import Dict, Any
+import torch.nn.functional as F
 
 # NOTE: The NUM_RULES constant is removed here. The logic now relies on the 
 # configuration being passed via rule_weights, which should only use index 0.
+
+# --- Stochastic Primal-Dual (SPD) Optimizers ---
+
+class SGDAOptimizer:
+    """
+    Stochastic Gradient Descent-Ascent (SGDA) Optimizer for Primal-Dual optimization.
+    
+    This implements the basic SPD method where we alternate between:
+    - Primal step: minimize the main loss function
+    - Dual step: maximize the dual objective (minimize negative dual)
+    """
+    
+    def __init__(self, model_params, dual_params, lr_primal=1e-5, lr_dual=1e-4):
+        """
+        Initialize SGDA optimizer.
+        
+        Args:
+            model_params: Model parameters (primal variables)
+            dual_params: Dual parameters (Lagrange multipliers)
+            lr_primal: Learning rate for primal updates
+            lr_dual: Learning rate for dual updates
+        """
+        # Primal optimizer (for model parameters)
+        self.primal_optimizer = torch.optim.AdamW(model_params, lr=lr_primal)
+        
+        # Dual optimizer (for dual parameters)
+        self.dual_optimizer = torch.optim.AdamW(dual_params, lr=lr_dual)
+        
+        print(f"SGDA Optimizer initialized:")
+        print(f"  - Primal LR: {lr_primal}")
+        print(f"  - Dual LR: {lr_dual}")
+    
+    def step(self, primal_loss, dual_loss):
+        """
+        Perform one step of SGDA optimization.
+        
+        Args:
+            primal_loss: Loss to minimize (main objective)
+            dual_loss: Loss to maximize (dual objective)
+        """
+        # Primal step: minimize main loss
+        self.primal_optimizer.zero_grad()
+        primal_loss.backward(retain_graph=True)  # retain_graph for dual step
+        self.primal_optimizer.step()
+        
+        # Dual step: maximize dual objective (minimize negative)
+        self.dual_optimizer.zero_grad()
+        (-dual_loss).backward()  # Maximize by minimizing negative
+        self.dual_optimizer.step()
+
+class OGDAOptimizer:
+    """
+    Optimistic Gradient Descent-Ascent (OGDA) Optimizer.
+    
+    This is an improved version of SGDA that uses "optimistic" updates
+    with momentum to achieve better convergence properties.
+    """
+    
+    def __init__(self, model_params, dual_params, lr_primal=1e-5, lr_dual=1e-4, momentum=0.9):
+        """
+        Initialize OGDA optimizer.
+        
+        Args:
+            model_params: Model parameters (primal variables)
+            dual_params: Dual parameters (Lagrange multipliers)
+            lr_primal: Learning rate for primal updates
+            lr_dual: Learning rate for dual updates
+            momentum: Momentum factor for optimistic updates
+        """
+        # Primal optimizer with momentum
+        self.primal_optimizer = torch.optim.AdamW(model_params, lr=lr_primal, betas=(momentum, 0.999))
+        
+        # Dual optimizer with momentum
+        self.dual_optimizer = torch.optim.AdamW(dual_params, lr=lr_dual, betas=(momentum, 0.999))
+        
+        # Store previous gradients for optimistic updates
+        self.prev_primal_grad = None
+        self.prev_dual_grad = None
+        
+        print(f"OGDA Optimizer initialized:")
+        print(f"  - Primal LR: {lr_primal}")
+        print(f"  - Dual LR: {lr_dual}")
+        print(f"  - Momentum: {momentum}")
+    
+    def step(self, primal_loss, dual_loss):
+        """
+        Perform one step of OGDA optimization.
+        
+        Args:
+            primal_loss: Loss to minimize (main objective)
+            dual_loss: Loss to maximize (dual objective)
+        """
+        # Compute current gradients
+        self.primal_optimizer.zero_grad()
+        primal_loss.backward(retain_graph=True)
+        current_primal_grad = [p.grad.clone() for p in self.primal_optimizer.param_groups[0]['params']]
+        
+        # Optimistic primal update (if we have previous gradient)
+        if self.prev_primal_grad is not None:
+            for param, prev_grad in zip(self.primal_optimizer.param_groups[0]['params'], self.prev_primal_grad):
+                if param.grad is not None:
+                    param.grad = 2 * param.grad - prev_grad  # Optimistic update
+        
+        self.primal_optimizer.step()
+        
+        # Compute current dual gradients
+        self.dual_optimizer.zero_grad()
+        (-dual_loss).backward()
+        current_dual_grad = [p.grad.clone() for p in self.dual_optimizer.param_groups[0]['params']]
+        
+        # Optimistic dual update (if we have previous gradient)
+        if self.prev_dual_grad is not None:
+            for param, prev_grad in zip(self.dual_optimizer.param_groups[0]['params'], self.prev_dual_grad):
+                if param.grad is not None:
+                    param.grad = 2 * param.grad - prev_grad  # Optimistic update
+        
+        self.dual_optimizer.step()
+        
+        # Store gradients for next iteration
+        self.prev_primal_grad = current_primal_grad
+        self.prev_dual_grad = current_dual_grad
+
+class RobustLoss(nn.Module):
+    """
+    Robust loss function that can be used with SPD methods.
+    
+    This implements a min-max formulation where we minimize the worst-case loss
+    over some perturbation set (e.g., adversarial examples).
+    """
+    
+    def __init__(self, base_loss_fn, perturbation_radius=0.1):
+        """
+        Initialize robust loss.
+        
+        Args:
+            base_loss_fn: Base loss function (e.g., BCEWithLogitsLoss)
+            perturbation_radius: Radius of perturbation set
+        """
+        super().__init__()
+        self.base_loss_fn = base_loss_fn
+        self.perturbation_radius = perturbation_radius
+        
+        # Dual parameter for the robust optimization
+        self.dual_param = nn.Parameter(torch.tensor(0.0))
+        
+        print(f"Robust Loss initialized with perturbation radius: {perturbation_radius}")
+    
+    def forward(self, logits, labels, numerical_features=None):
+        """
+        Compute robust loss.
+        
+        Args:
+            logits: Model predictions
+            labels: True labels
+            numerical_features: Additional features (optional)
+            
+        Returns:
+            Tuple of (primal_loss, dual_loss) for SPD optimization
+        """
+        # Base loss (primal objective)
+        base_loss = self.base_loss_fn(logits, labels.float())
+        
+        # Robust loss: min_θ max_δ L(θ, x + δ, y)
+        # For simplicity, we use a quadratic penalty for perturbations
+        perturbation_penalty = self.dual_param * (torch.norm(logits) ** 2 - self.perturbation_radius ** 2)
+        
+        # Primal loss: base loss + penalty
+        primal_loss = base_loss + perturbation_penalty
+        
+        # Dual loss: negative of the penalty (to maximize)
+        dual_loss = -perturbation_penalty
+        
+        return primal_loss, dual_loss
 
 class CustomCostSensitiveLoss(_Loss):
     """

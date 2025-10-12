@@ -14,7 +14,7 @@ from typing import Dict, Any, Tuple
 # NOTE: The import below assumes your data_preprocessing file is named 'preprocess.py'
 from preprocess import preprocess_data
 from custom_model import CustomTransformerModel
-from custom_loss import CustomCostSensitiveLoss
+from custom_loss import CustomCostSensitiveLoss, SGDAOptimizer, OGDAOptimizer, RobustLoss
 
 # --- 0. Configuration and Constants ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -22,11 +22,50 @@ TRANSFORMER_MODEL_NAME = 'microsoft/deberta-v3-base'  # DeBERTa-v3-base (184M pa
 TRAIN_FILE_PATH = '../data/train.csv' # Use the actual file name
 NUM_RULES = 1  # IMPORTANT: Set this to your actual number of policy columns
 BATCH_SIZE = 6  # Further reduced for DeBERTa-v3 (better but larger)
-LEARNING_RATE = 1e-5  # Lower LR for v3 (more stable training)
-NUM_EPOCHS = 5  # More epochs for better convergence
+LEARNING_RATE = 5e-6  # Even lower LR to prevent overfitting
+NUM_EPOCHS = 3  # Early stopping to prevent overfitting
 MAX_SEQ_LENGTH = 256
 VALIDATION_SPLIT_RATIO = 0.15
 RANDOM_SEED = 42
+
+# Ensemble configuration
+ENSEMBLE_MODE = False  # Set to True to train multiple models
+
+# SPD (Stochastic Primal-Dual) configuration
+SPD_MODE = False  # Set to True to use SPD optimization
+SPD_METHOD = 'SGDA'  # Options: 'SGDA', 'OGDA'
+SPD_LR_PRIMAL = 1e-5  # Learning rate for primal variables (model parameters)
+SPD_LR_DUAL = 1e-4   # Learning rate for dual variables (Lagrange multipliers)
+ENSEMBLE_MODELS = {
+    'deberta_v3_base': {
+        'name': 'microsoft/deberta-v3-base',
+        'batch_size': 6,
+        'learning_rate': 5e-6,
+        'epochs': 3,
+        'weight': 0.4
+    },
+    'roberta_base': {
+        'name': 'roberta-base',
+        'batch_size': 8,
+        'learning_rate': 1e-5,
+        'epochs': 3,
+        'weight': 0.3
+    },
+    'deberta_base': {
+        'name': 'microsoft/deberta-base',
+        'batch_size': 8,
+        'learning_rate': 1e-5,
+        'epochs': 3,
+        'weight': 0.2
+    },
+    'bert_base': {
+        'name': 'bert-base-uncased',
+        'batch_size': 10,
+        'learning_rate': 2e-5,
+        'epochs': 3,
+        'weight': 0.1
+    }
+}
 
 # This list must exactly match the order of features created in data_preprocessing.py
 NUMERICAL_FEATURES = [
@@ -247,6 +286,8 @@ def train_model():
     print(f"Number of batches per epoch: {len(train_dataloader)}")
     print(f"Batch size: {BATCH_SIZE}")
     
+    best_auc = 0.0
+    
     for epoch in range(NUM_EPOCHS):
         print(f"\nStarting Epoch {epoch+1}/{NUM_EPOCHS}")
         model.train()
@@ -295,8 +336,391 @@ def train_model():
         print(f"Validation Column-Averaged AUC: {validation_auc:.4f}")
         print(f"AUC Per Rule: {np.round(auc_per_rule, 4)}") # Display per-rule performance
         
-        # NOTE: At this point, you would typically save the model if validation_auc improved.
+        # Save best model for error analysis
+        if validation_auc > best_auc:
+            torch.save(model.state_dict(), 'best_model.pth')
+            print(f"New best model saved! AUC: {validation_auc:.4f}")
+            best_auc = validation_auc
+    
+    print(f"\nTraining complete. Best validation AUC: {best_auc:.4f}")
+
+# --- Ensemble Training Functions ---
+
+def train_ensemble_model(model_name: str, model_config: dict, train_df_processed: pd.DataFrame, 
+                        validation_df_processed: pd.DataFrame, tfidf_model, mean_vectors, scaler) -> float:
+    """
+    Train a single model in the ensemble.
+    
+    Args:
+        model_name: Name of the model (e.g., 'deberta_v3_base')
+        model_config: Configuration dictionary for this model
+        train_df_processed: Preprocessed training data
+        validation_df_processed: Preprocessed validation data
+        tfidf_model: Fitted TF-IDF model
+        mean_vectors: Mean vectors for similarity features
+        scaler: Fitted scaler
+        
+    Returns:
+        Best validation AUC for this model
+    """
+    print(f"\n{'='*60}")
+    print(f"TRAINING ENSEMBLE MODEL: {model_name.upper()}")
+    print(f"{'='*60}")
+    
+    # Create tokenizer for this specific model
+    tokenizer = AutoTokenizer.from_pretrained(model_config['name'])
+    print(f"Loaded tokenizer: {model_config['name']}")
+    
+    # Create datasets with model-specific tokenizer
+    train_dataset = ToxicityDataset(train_df_processed, tokenizer)
+    validation_dataset = ToxicityDataset(validation_df_processed, tokenizer)
+    
+    # Create dataloaders with model-specific batch size
+    train_dataloader = DataLoader(train_dataset, batch_size=model_config['batch_size'], shuffle=True, num_workers=0)
+    validation_dataloader = DataLoader(validation_dataset, batch_size=model_config['batch_size'], shuffle=False, num_workers=0)
+    
+    print(f"Training batches: {len(train_dataloader)}, Validation batches: {len(validation_dataloader)}")
+    
+    # Initialize model
+    model = CustomTransformerModel(
+        transformer_name=model_config['name'],
+        num_numerical_features=NUM_NUMERICAL_FEATURES,
+        num_rules=NUM_RULES
+    ).to(DEVICE)
+    
+    # Initialize loss and optimizer
+    criterion = CustomCostSensitiveLoss(
+        rule_weights=RULE_WEIGHTS,
+        feature_weights=FEATURE_WEIGHTS
+    )
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=model_config['learning_rate'])
+    
+    # Training loop
+    best_auc = 0.0
+    
+    for epoch in range(model_config['epochs']):
+        print(f"\nEpoch {epoch+1}/{model_config['epochs']} for {model_name}")
+        
+        # Training phase
+        model.train()
+        total_loss = 0
+        
+        for batch_idx, batch in enumerate(train_dataloader):
+            # Move data to device
+            input_ids = batch['input_ids'].to(DEVICE)
+            attention_mask = batch['attention_mask'].to(DEVICE)
+            numerical_features = batch['numerical_features'].to(DEVICE)
+            labels = batch['labels'].to(DEVICE)
+            
+            # Zero gradients
+            optimizer.zero_grad()
+            
+            # Forward pass
+            logits = model(input_ids, attention_mask, numerical_features)
+            
+            # Compute loss
+            loss = criterion(logits, labels, numerical_features)
+            
+            # Backward pass
+            loss.backward()
+            
+            # Update parameters
+            optimizer.step()
+            
+            total_loss += loss.item()
+            
+            # Print progress every 50 batches
+            if batch_idx % 50 == 0:
+                print(f"  Batch {batch_idx}/{len(train_dataloader)}, Loss: {loss.item():.4f}")
+        
+        # Validation phase
+        avg_loss = total_loss / len(train_dataloader)
+        validation_auc, _ = evaluate_model(model, validation_dataloader, DEVICE)
+        
+        print(f"  Average Loss: {avg_loss:.4f}")
+        print(f"  Validation AUC: {validation_auc:.4f}")
+        
+        # Save best model
+        if validation_auc > best_auc:
+            best_auc = validation_auc
+            model_path = f'models/{model_name}_best.pth'
+            import os
+            os.makedirs('models', exist_ok=True)
+            torch.save(model.state_dict(), model_path)
+            print(f"  New best model saved: {model_path}")
+    
+    print(f"\n{model_name} training complete! Best AUC: {best_auc:.4f}")
+    return best_auc
+
+def train_ensemble():
+    """
+    Train multiple models for ensemble.
+    """
+    print("Starting Ensemble Training")
+    print("="*60)
+    
+    # Load and split data (same as single model training)
+    try:
+        print(f"Loading data from: {TRAIN_FILE_PATH}")
+        full_train_df = pd.read_csv(TRAIN_FILE_PATH)
+        print(f"Data loaded successfully. Shape: {full_train_df.shape}")
+    except FileNotFoundError:
+        print(f"FATAL ERROR: '{TRAIN_FILE_PATH}' not found.")
+        return
+    except Exception as e:
+        print(f"FATAL ERROR loading data: {e}")
+        return
+    
+    # Split data
+    if 'rule_violation' in full_train_df.columns:
+        stratify_col = full_train_df['rule_violation']
+    else:
+        label_columns = full_train_df.filter(regex='rule_').columns.tolist()
+        stratify_col = full_train_df[label_columns].sum(axis=1) if label_columns else None
+    
+    train_df_raw, validation_df_raw = train_test_split(
+        full_train_df,
+        test_size=VALIDATION_SPLIT_RATIO,
+        random_state=RANDOM_SEED,
+        stratify=stratify_col
+    )
+    
+    print(f"Dataset split: Train={len(train_df_raw)} samples, Validation={len(validation_df_raw)} samples")
+    
+    # Preprocess data once (all models will use the same preprocessing)
+    print("\nPreprocessing data for ensemble...")
+    train_df_processed, tfidf_model, mean_vectors, scaler = preprocess_data(
+        file_path=None,
+        df_to_process=train_df_raw
+    )
+    
+    validation_df_processed, _, _, _ = preprocess_data(
+        file_path=None,
+        df_to_process=validation_df_raw,
+        tfidf_model=tfidf_model,
+        mean_vectors=mean_vectors,
+        scaler=scaler
+    )
+    
+    # Train each model in the ensemble
+    model_performances = {}
+    
+    for model_name, model_config in ENSEMBLE_MODELS.items():
+        try:
+            auc = train_ensemble_model(
+                model_name, model_config, 
+                train_df_processed, validation_df_processed,
+                tfidf_model, mean_vectors, scaler
+            )
+            model_performances[model_name] = auc
+        except Exception as e:
+            print(f"Error training {model_name}: {e}")
+            model_performances[model_name] = 0.0
+    
+    # Create ensemble weights based on performance
+    print(f"\n{'='*60}")
+    print("ENSEMBLE TRAINING SUMMARY")
+    print(f"{'='*60}")
+    
+    total_performance = sum(model_performances.values())
+    ensemble_weights = {}
+    
+    for model_name, auc in model_performances.items():
+        print(f"{model_name}: {auc:.4f} AUC")
+        
+        # Create weights based on performance
+        original_weight = ENSEMBLE_MODELS[model_name]['weight']
+        performance_weight = auc / total_performance if total_performance > 0 else 0.25
+        
+        # Combine original and performance-based weights
+        final_weight = 0.7 * performance_weight + 0.3 * original_weight
+        ensemble_weights[model_name] = final_weight
+    
+    # Normalize weights to sum to 1
+    total_weight = sum(ensemble_weights.values())
+    for model_name in ensemble_weights:
+        ensemble_weights[model_name] /= total_weight
+    
+    print(f"\nFinal Ensemble Weights:")
+    for model_name, weight in ensemble_weights.items():
+        print(f"  {model_name}: {weight:.4f}")
+    
+    # Save ensemble configuration
+    import json
+    config = {
+        'model_configs': ENSEMBLE_MODELS,
+        'ensemble_weights': ensemble_weights,
+        'model_performances': model_performances
+    }
+    
+    with open('models/ensemble_config.json', 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"\nEnsemble training complete!")
+    print(f"Configuration saved to models/ensemble_config.json")
+
+# --- SPD Training Functions ---
+
+def train_with_spd():
+    """
+    Train model using Stochastic Primal-Dual (SPD) optimization.
+    """
+    print("Starting SPD Training")
+    print("="*60)
+    print(f"SPD Method: {SPD_METHOD}")
+    print(f"Primal LR: {SPD_LR_PRIMAL}, Dual LR: {SPD_LR_DUAL}")
+    
+    # Load and preprocess data (same as regular training)
+    try:
+        print(f"Loading data from: {TRAIN_FILE_PATH}")
+        full_train_df = pd.read_csv(TRAIN_FILE_PATH)
+        print(f"Data loaded successfully. Shape: {full_train_df.shape}")
+    except FileNotFoundError:
+        print(f"FATAL ERROR: '{TRAIN_FILE_PATH}' not found.")
+        return
+    except Exception as e:
+        print(f"FATAL ERROR loading data: {e}")
+        return
+    
+    # Split data
+    if 'rule_violation' in full_train_df.columns:
+        stratify_col = full_train_df['rule_violation']
+    else:
+        label_columns = full_train_df.filter(regex='rule_').columns.tolist()
+        stratify_col = full_train_df[label_columns].sum(axis=1) if label_columns else None
+    
+    train_df_raw, validation_df_raw = train_test_split(
+        full_train_df,
+        test_size=VALIDATION_SPLIT_RATIO,
+        random_state=RANDOM_SEED,
+        stratify=stratify_col
+    )
+    
+    print(f"Dataset split: Train={len(train_df_raw)} samples, Validation={len(validation_df_raw)} samples")
+    
+    # Preprocess data
+    print("\nPreprocessing data...")
+    train_df_processed, tfidf_model, mean_vectors, scaler = preprocess_data(
+        file_path=None,
+        df_to_process=train_df_raw
+    )
+    
+    validation_df_processed, _, _, _ = preprocess_data(
+        file_path=None,
+        df_to_process=validation_df_raw,
+        tfidf_model=tfidf_model,
+        mean_vectors=mean_vectors,
+        scaler=scaler
+    )
+    
+    # Create dataloaders
+    print("\nSetting up dataloaders...")
+    tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL_NAME)
+    train_dataset = ToxicityDataset(train_df_processed, tokenizer)
+    validation_dataset = ToxicityDataset(validation_df_processed, tokenizer)
+    
+    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    validation_dataloader = DataLoader(validation_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    
+    # Initialize model
+    print(f"\nInitializing model: {TRANSFORMER_MODEL_NAME}")
+    model = CustomTransformerModel(
+        transformer_name=TRANSFORMER_MODEL_NAME,
+        num_numerical_features=NUM_NUMERICAL_FEATURES,
+        num_rules=NUM_RULES
+    ).to(DEVICE)
+    
+    # Initialize SPD loss and optimizer
+    print("Initializing SPD loss and optimizer...")
+    
+    # Create robust loss function
+    base_loss_fn = torch.nn.BCEWithLogitsLoss(reduction='none')
+    robust_loss_fn = RobustLoss(base_loss_fn, perturbation_radius=0.1)
+    
+    # Create dual parameters (Lagrange multipliers)
+    dual_params = [robust_loss_fn.dual_param]
+    
+    # Initialize SPD optimizer
+    if SPD_METHOD == 'SGDA':
+        optimizer = SGDAOptimizer(
+            model.parameters(), 
+            dual_params, 
+            lr_primal=SPD_LR_PRIMAL, 
+            lr_dual=SPD_LR_DUAL
+        )
+    elif SPD_METHOD == 'OGDA':
+        optimizer = OGDAOptimizer(
+            model.parameters(), 
+            dual_params, 
+            lr_primal=SPD_LR_PRIMAL, 
+            lr_dual=SPD_LR_DUAL
+        )
+    else:
+        raise ValueError(f"Unknown SPD method: {SPD_METHOD}")
+    
+    # Training loop
+    print(f"\nStarting SPD training for {NUM_EPOCHS} epochs...")
+    best_auc = 0.0
+    
+    for epoch in range(NUM_EPOCHS):
+        print(f"\nEpoch {epoch+1}/{NUM_EPOCHS}")
+        model.train()
+        total_primal_loss = 0
+        total_dual_loss = 0
+        
+        for batch_idx, batch in enumerate(train_dataloader):
+            # Move data to device
+            input_ids = batch['input_ids'].to(DEVICE)
+            attention_mask = batch['attention_mask'].to(DEVICE)
+            numerical_features = batch['numerical_features'].to(DEVICE)
+            labels = batch['labels'].to(DEVICE)
+            
+            # Forward pass
+            logits = model(input_ids, attention_mask, numerical_features)
+            
+            # Compute SPD losses
+            primal_loss, dual_loss = robust_loss_fn(logits, labels, numerical_features)
+            
+            # SPD optimization step
+            optimizer.step(primal_loss, dual_loss)
+            
+            total_primal_loss += primal_loss.item()
+            total_dual_loss += dual_loss.item()
+            
+            # Print progress every 50 batches
+            if batch_idx % 50 == 0:
+                print(f"  Batch {batch_idx}/{len(train_dataloader)}")
+                print(f"    Primal Loss: {primal_loss.item():.4f}")
+                print(f"    Dual Loss: {dual_loss.item():.4f}")
+                print(f"    Dual Param: {robust_loss_fn.dual_param.item():.4f}")
+        
+        # Validation
+        avg_primal_loss = total_primal_loss / len(train_dataloader)
+        avg_dual_loss = total_dual_loss / len(train_dataloader)
+        validation_auc, _ = evaluate_model(model, validation_dataloader, DEVICE)
+        
+        print(f"\nEpoch {epoch+1} Summary:")
+        print(f"  Average Primal Loss: {avg_primal_loss:.4f}")
+        print(f"  Average Dual Loss: {avg_dual_loss:.4f}")
+        print(f"  Validation AUC: {validation_auc:.4f}")
+        print(f"  Dual Parameter: {robust_loss_fn.dual_param.item():.4f}")
+        
+        # Save best model
+        if validation_auc > best_auc:
+            best_auc = validation_auc
+            torch.save(model.state_dict(), 'spd_best_model.pth')
+            print(f"  New best SPD model saved! AUC: {validation_auc:.4f}")
+    
+    print(f"\nSPD training complete!")
+    print(f"Best validation AUC: {best_auc:.4f}")
+    print(f"Final dual parameter: {robust_loss_fn.dual_param.item():.4f}")
 
 # --- Execute Script ---
 if __name__ == '__main__':
-    train_model()
+    if ENSEMBLE_MODE:
+        train_ensemble()
+    elif SPD_MODE:
+        train_with_spd()
+    else:
+        train_model()
