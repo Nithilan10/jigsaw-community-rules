@@ -3,12 +3,14 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, get_linear_schedule_with_warmup
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from typing import Dict, Any, Tuple
+from torch.cuda.amp import autocast, GradScaler
 
 # Import custom modules
 # NOTE: The import below assumes your data_preprocessing file is named 'preprocess.py'
@@ -22,14 +24,23 @@ TRANSFORMER_MODEL_NAME = 'microsoft/deberta-v3-base'  # DeBERTa-v3-base (184M pa
 TRAIN_FILE_PATH = '../data/train.csv' # Use the actual file name
 NUM_RULES = 1  # IMPORTANT: Set this to your actual number of policy columns
 BATCH_SIZE = 8  # Balanced for DeBERTa-v3 (larger model needs more data per batch)
-LEARNING_RATE = 1e-5  # Higher LR for better learning with larger model
-NUM_EPOCHS = 4  # More epochs for larger model to converge
+LEARNING_RATE = 1e-5  # Base learning rate (will be scheduled)
+NUM_EPOCHS = 6  # More epochs with early stopping
 MAX_SEQ_LENGTH = 256
 VALIDATION_SPLIT_RATIO = 0.15
 RANDOM_SEED = 42
 
+# Enhanced Training Parameters
+USE_LEARNING_RATE_SCHEDULING = True  # Enable LR scheduling
+USE_EARLY_STOPPING = True           # Enable early stopping
+USE_GRADIENT_CLIPPING = True        # Enable gradient clipping
+USE_MIXED_PRECISION = True          # Enable mixed precision training
+EARLY_STOPPING_PATIENCE = 3         # Stop if no improvement for 3 epochs
+GRADIENT_CLIP_NORM = 1.0           # Max gradient norm
+WARMUP_RATIO = 0.1                 # 10% of training for warmup
+
 # Ensemble configuration
-ENSEMBLE_MODE = False  # Set to True to train multiple models
+ENSEMBLE_MODE = True  # Set to True to train multiple models
 
 # SPD (Stochastic Primal-Dual) configuration
 SPD_MODE = False  # Set to True to use SPD optimization
@@ -85,7 +96,41 @@ FEATURE_WEIGHTS = {
     'comment_length_short': 1.5               # Reduced from 5.0
 }
 
-# --- 1. Custom Dataset Class (No changes needed here) ---
+# --- 1. Enhanced Training Utilities ---
+
+class EarlyStopping:
+    """
+    Early stopping utility to prevent overfitting.
+    """
+    def __init__(self, patience: int = 3, min_delta: float = 0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_auc = 0.0
+        self.wait = 0
+        self.stopped_epoch = 0
+        
+    def __call__(self, val_auc: float) -> bool:
+        """
+        Check if training should stop.
+        
+        Args:
+            val_auc: Current validation AUC
+            
+        Returns:
+            True if training should stop, False otherwise
+        """
+        if val_auc > self.best_auc + self.min_delta:
+            self.best_auc = val_auc
+            self.wait = 0
+            return False  # Continue training
+        else:
+            self.wait += 1
+            if self.wait >= self.patience:
+                self.stopped_epoch = self.wait
+                return True  # Stop training
+            return False  # Continue training
+
+# --- 2. Custom Dataset Class (No changes needed here) ---
 
 class ToxicityDataset(Dataset):
     """Handles tokenizing text and extracting numerical features and labels."""
@@ -278,13 +323,44 @@ def train_model():
         feature_weights=FEATURE_WEIGHTS
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    # Enhanced optimizer with better parameters
+    optimizer = torch.optim.AdamW(
+        model.parameters(), 
+        lr=LEARNING_RATE,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.01,
+        amsgrad=True
+    )
+
+    # Learning rate scheduler
+    scheduler = None
+    if USE_LEARNING_RATE_SCHEDULING:
+        total_steps = len(train_dataloader) * NUM_EPOCHS
+        warmup_steps = int(total_steps * WARMUP_RATIO)
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps
+        )
+        print(f"Learning rate scheduling enabled: {warmup_steps} warmup steps")
+
+    # Mixed precision scaler
+    scaler = GradScaler() if USE_MIXED_PRECISION else None
+    if USE_MIXED_PRECISION:
+        print("Mixed precision training enabled")
+
+    # Early stopping
+    early_stopping = EarlyStopping(patience=EARLY_STOPPING_PATIENCE) if USE_EARLY_STOPPING else None
+    if USE_EARLY_STOPPING:
+        print(f"Early stopping enabled with patience: {EARLY_STOPPING_PATIENCE}")
 
     # --- Training Loop ---
-    print(f"\n--- 3. Starting Training on {DEVICE} ---")
+    print(f"\n--- 3. Starting Enhanced Training on {DEVICE} ---")
     print(f"Training dataset size: {len(train_dataset)}")
     print(f"Number of batches per epoch: {len(train_dataloader)}")
     print(f"Batch size: {BATCH_SIZE}")
+    print(f"Gradient clipping: {'Enabled' if USE_GRADIENT_CLIPPING else 'Disabled'}")
     
     best_auc = 0.0
     
@@ -302,19 +378,46 @@ def train_model():
 
             optimizer.zero_grad()
             
-            # Forward pass
-            logits = model(input_ids, attention_mask, numerical_features)
+            # Forward pass with mixed precision
+            if USE_MIXED_PRECISION:
+                with autocast():
+                    logits = model(input_ids, attention_mask, numerical_features)
+                    loss = criterion(logits, labels, numerical_features)
+                
+                # Backward pass with mixed precision
+                scaler.scale(loss).backward()
+                
+                # Gradient clipping
+                if USE_GRADIENT_CLIPPING:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
+                
+                # Optimizer step
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard forward pass
+                logits = model(input_ids, attention_mask, numerical_features)
+                try:
+                    loss = criterion(logits, labels, numerical_features)
+                except Exception as e:
+                    print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
+                    print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                    raise e
+                
+                # Standard backward pass
+                loss.backward()
+                
+                # Gradient clipping
+                if USE_GRADIENT_CLIPPING:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
+                
+                # Optimizer step
+                optimizer.step()
             
-            # Calculate the Custom Weighted Loss
-            try:
-                loss = criterion(logits, labels, numerical_features)
-            except Exception as e:
-                print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
-                print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
-                raise e
-            
-            loss.backward()
-            optimizer.step()
+            # Learning rate scheduling
+            if scheduler is not None:
+                scheduler.step()
             
             total_loss += loss.item()
             
@@ -341,6 +444,13 @@ def train_model():
             torch.save(model.state_dict(), 'best_model.pth')
             print(f"New best model saved! AUC: {validation_auc:.4f}")
             best_auc = validation_auc
+        
+        # Early stopping check
+        if early_stopping is not None:
+            if early_stopping(validation_auc):
+                print(f"\nEarly stopping triggered at epoch {epoch+1}")
+                print(f"Best AUC achieved: {early_stopping.best_auc:.4f}")
+                break
     
     print(f"\nTraining complete. Best validation AUC: {best_auc:.4f}")
 
