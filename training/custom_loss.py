@@ -282,6 +282,12 @@ class CustomCostSensitiveLoss(_Loss):
             print("WARNING: NaN or Inf values detected in numerical_features")
             numerical_features = torch.nan_to_num(numerical_features, nan=0.0, posinf=1.0, neginf=-1.0)
         
+        # Ensure labels have the right shape [Batch, 1]
+        if labels.dim() == 1:
+            labels = labels.unsqueeze(1)
+        if logits.dim() == 1:
+            logits = logits.unsqueeze(1)
+        
         # 1. Start with the standard loss for every sample and every rule
         # Output shape: [Batch, 1]
         element_wise_loss = self.base_loss_fn(logits, labels.float())
