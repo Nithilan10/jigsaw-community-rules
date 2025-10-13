@@ -8,7 +8,7 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
-from sklearn.metrics import roc_auc_score, make_scorer
+from sklearn.metrics import roc_auc_score, make_scorer, roc_curve
 from typing import Dict, Any, Tuple, List
 from torch.cuda.amp import autocast, GradScaler
 import itertools
@@ -66,6 +66,9 @@ WEIGHT_DECAY = 1e-4                # Weight decay coefficient
 GRADIENT_PENALTY_WEIGHT = 0.1      # Gradient penalty weight
 
 # Removed ensemble and SPD - focusing on single model + features
+HYPERPARAMETER_TUNING = False
+ENSEMBLE_MODE = False
+SPD_MODE = False
 
 # This list must exactly match the order of features created in data_preprocessing.py
 NUMERICAL_FEATURES = [
@@ -249,18 +252,27 @@ def apply_smote_oversampling(X_text: list, X_numerical: np.ndarray, y: np.ndarra
 
 # --- 2. Custom Dataset Class (No changes needed here) ---
 
-class ToxicityDataset(Dataset):
+class CustomDataset(Dataset):
     """Handles tokenizing text and extracting numerical features and labels."""
-    def __init__(self, df: pd.DataFrame, tokenizer: AutoTokenizer):
+    def __init__(self, df: pd.DataFrame, tokenizer: AutoTokenizer, max_length: int = 256):
         self.texts = df['comment_text'].values
-        self.numerical = torch.tensor(df[NUMERICAL_FEATURES].values, dtype=torch.float32)
+        
+        # Get all numerical features dynamically
+        numerical_cols = [col for col in df.columns 
+                         if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule'] 
+                         and df[col].dtype in ['int64', 'float64']]
+        
+        self.numerical = torch.tensor(df[numerical_cols].values, dtype=torch.float32)
+        
         # Handle the actual label column 'rule_violation' from the CSV
         if 'rule_violation' in df.columns:
             self.labels = torch.tensor(df['rule_violation'].values, dtype=torch.long).unsqueeze(1)
         else:
             # Fallback to rule_ columns if they exist
             self.labels = torch.tensor(df.filter(regex='rule_').values, dtype=torch.long)
+        
         self.tokenizer = tokenizer
+        self.max_length = max_length
 
     def __len__(self):
         return len(self.texts)
@@ -270,7 +282,7 @@ class ToxicityDataset(Dataset):
             self.texts[idx], 
             padding='max_length', 
             truncation=True, 
-            max_length=MAX_SEQ_LENGTH,
+            max_length=self.max_length,
             return_tensors='pt'
         )
         return {
@@ -285,8 +297,6 @@ class ToxicityDataset(Dataset):
 
 def find_optimal_threshold(y_true, y_scores):
     """Find the optimal threshold for the given true labels and predicted scores."""
-    from sklearn.metrics import roc_curve, auc
-    import numpy as np
     fpr, tpr, thresholds = roc_curve(y_true, y_scores)
     j_scores = tpr - fpr
     optimal_idx = np.argmax(j_scores)
@@ -452,7 +462,7 @@ def train_model():
         return
     
     print("Creating training dataset...")
-    train_dataset = ToxicityDataset(train_df_processed, tokenizer)
+    train_dataset = CustomDataset(train_df_processed, tokenizer, MAX_SEQ_LENGTH)
     print(f"Training dataset created with {len(train_dataset)} samples")
     
     print("Creating training dataloader...")
@@ -460,7 +470,7 @@ def train_model():
     print(f"Training dataloader created with {len(train_dataloader)} batches")
     
     print("Creating validation dataset...")
-    validation_dataset = ToxicityDataset(validation_df_processed, tokenizer)
+    validation_dataset = CustomDataset(validation_df_processed, tokenizer, MAX_SEQ_LENGTH)
     print(f"Validation dataset created with {len(validation_dataset)} samples")
     
     print("Creating validation dataloader...")
@@ -477,9 +487,10 @@ def train_model():
         print(f"GPU memory before model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
     
     model = CustomTransformerModel(
-        transformer_name=TRANSFORMER_MODEL_NAME, 
+        model_name=TRANSFORMER_MODEL_NAME, 
         num_numerical_features=NUM_NUMERICAL_FEATURES, 
-        num_rules=NUM_RULES
+        num_classes=1,
+        dropout_rate=0.1
     ).to(DEVICE)
     
     if DEVICE.type == 'cuda':
@@ -659,4 +670,4 @@ if __name__ == '__main__':
     elif SPD_MODE:
         train_with_spd()
     else:
-    train_model()
+        train_model()
