@@ -1555,7 +1555,7 @@ def calculate_mutual_information_features(df: pd.DataFrame, target_column: str =
         
         # Convert to DataFrame and merge
         if mi_features:
-            mi_df = pd.DataFrame(mi_features)
+            mi_df = pd.DataFrame(mi_features, index=df.index)
             df = pd.concat([df, mi_df], axis=1)
             print(f"Added {len(mi_features)} mutual information features")
         else:
@@ -1689,7 +1689,7 @@ def calculate_recursive_feature_elimination_features(df: pd.DataFrame, target_co
         
         # Convert to DataFrame and merge
         if rfe_features:
-            rfe_df = pd.DataFrame(rfe_features)
+            rfe_df = pd.DataFrame(rfe_features, index=df.index)
             df = pd.concat([df, rfe_df], axis=1)
             print(f"Added {len(rfe_features)} RFE features")
         else:
@@ -1756,10 +1756,13 @@ def calculate_rule_specific_comparisons(df: pd.DataFrame, tfidf_model: TfidfVect
     # Calculate rule-specific patterns for each rule
     rule_patterns = {}
     
-    for rule in unique_rules:
+    for i, rule in enumerate(unique_rules):
+        print(f"Processing rule {i+1}/{len(unique_rules)}: {rule}")
+        
         rule_data = df[df['rule'] == rule]
         
         if len(rule_data) < 2:  # Need at least 2 examples to compare
+            print(f"  Skipping rule '{rule}': insufficient data ({len(rule_data)} examples)")
             continue
             
         # Get positive and negative examples for this rule
@@ -1777,15 +1780,25 @@ def calculate_rule_specific_comparisons(df: pd.DataFrame, tfidf_model: TfidfVect
                 neg_examples.append(str(row['negative_example_2']))
         
         if len(pos_examples) == 0 or len(neg_examples) == 0:
+            print(f"  Skipping rule '{rule}': no positive or negative examples")
             continue
             
-        # Calculate rule-specific patterns
-        rule_patterns[rule] = calculate_rule_patterns(pos_examples, neg_examples, tfidf_model)
+        print(f"  Calculating patterns for {len(pos_examples)} positive and {len(neg_examples)} negative examples")
+        try:
+            rule_patterns[rule] = calculate_rule_patterns(pos_examples, neg_examples, tfidf_model)
+            print(f"  Completed rule '{rule}'")
+        except Exception as e:
+            print(f"  Error processing rule '{rule}': {e}")
+            continue
     
     # Apply rule-specific features to each row
     all_features = []
     
+    print(f"Applying rule-specific features to {len(df)} rows...")
     for idx, row in df.iterrows():
+        if idx % 500 == 0:
+            print(f"  Processing row {idx}/{len(df)}")
+            
         rule = row['rule']
         text = row['comment_text']
         
