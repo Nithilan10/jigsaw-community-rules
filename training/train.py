@@ -492,10 +492,9 @@ def train_model():
         print(f"GPU memory before model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
     
     model = CustomTransformerModel(
-        model_name=TRANSFORMER_MODEL_NAME, 
+        transformer_name=TRANSFORMER_MODEL_NAME, 
         num_numerical_features=NUM_NUMERICAL_FEATURES, 
-        num_classes=1,
-        dropout_rate=0.1
+        num_rules=1
     ).to(DEVICE)
     
     if DEVICE.type == 'cuda':

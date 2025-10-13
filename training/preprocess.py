@@ -1761,14 +1761,14 @@ def calculate_rule_patterns_simple(pos_examples: list, neg_examples: list, tfidf
         sample_size = min(20, len(pos_examples))
         for i in range(sample_size):
             for j in range(i+1, sample_size):
-                if i < len(pos_vectors) and j < len(pos_vectors):
+                if i < pos_vectors.shape[0] and j < pos_vectors.shape[0]:
                     sim = cosine_similarity(pos_vectors[i:i+1], pos_vectors[j:j+1])[0][0]
                     pos_similarities.append(sim)
         
         sample_size = min(20, len(neg_examples))
         for i in range(sample_size):
             for j in range(i+1, sample_size):
-                if i < len(neg_vectors) and j < len(neg_vectors):
+                if i < neg_vectors.shape[0] and j < neg_vectors.shape[0]:
                     sim = cosine_similarity(neg_vectors[i:i+1], neg_vectors[j:j+1])[0][0]
                     neg_similarities.append(sim)
         
