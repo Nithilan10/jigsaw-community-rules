@@ -9,6 +9,68 @@ import torch.nn.functional as F
 # NOTE: The NUM_RULES constant is removed here. The logic now relies on the 
 # configuration being passed via rule_weights, which should only use index 0.
 
+# --- Custom Cost Sensitive Loss ---
+
+class CustomCostSensitiveLoss(nn.Module):
+    """
+    Custom Cost Sensitive Loss that applies rule-based and feature-based weighting.
+    """
+    
+    def __init__(self, rule_weights: Dict[str, float] = None, feature_weights: Dict[str, float] = None):
+        """
+        Initialize Custom Cost Sensitive Loss.
+        
+        Args:
+            rule_weights: Dictionary of rule weights
+            feature_weights: Dictionary of feature weights
+        """
+        super().__init__()
+        self.rule_weights = rule_weights or {}
+        self.feature_weights = feature_weights or {}
+        
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor, numerical_features: torch.Tensor = None, model: nn.Module = None) -> torch.Tensor:
+        """
+        Forward pass of Custom Cost Sensitive Loss.
+        
+        Args:
+            logits: Model predictions (logits)
+            labels: True labels
+            numerical_features: Numerical features (optional)
+            model: Model for regularization (optional, not used)
+            
+        Returns:
+            Weighted loss value
+        """
+        # Ensure logits and labels have the same shape
+        if logits.dim() == 1:
+            logits = logits.unsqueeze(1)
+        if labels.dim() == 1:
+            labels = labels.unsqueeze(1)
+            
+        # Calculate base binary cross entropy loss
+        base_loss = F.binary_cross_entropy_with_logits(logits, labels.float(), reduction='none')
+        
+        # Apply rule-based weighting (simplified - just use a constant weight for now)
+        rule_weight = 1.0
+        if self.rule_weights:
+            rule_weight = list(self.rule_weights.values())[0] if self.rule_weights else 1.0
+            
+        # Apply feature-based weighting (simplified - just use a constant weight for now)
+        feature_weight = 1.0
+        if self.feature_weights:
+            feature_weight = list(self.feature_weights.values())[0] if self.feature_weights else 1.0
+            
+        # Combine weights
+        total_weight = rule_weight * feature_weight
+        
+        # Apply weighting
+        weighted_loss = base_loss * total_weight
+        
+        # Clip loss to prevent numerical instability
+        weighted_loss = torch.clamp(weighted_loss, min=-10.0, max=10.0)
+        
+        return weighted_loss.mean()
+
 # --- Focal Loss for Class Imbalance ---
 
 class FocalLoss(nn.Module):
