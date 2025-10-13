@@ -466,19 +466,19 @@ def extract_lexical_diversity_features(text: str) -> dict:
             # Simple lexical diversity without spaCy dependency
             words = [word.lower() for word in text.split() if word.isalpha()]
             unique_words = set(words)
-            lexical_diversity = len(unique_words) / len(words) if words else 0
+            lexical_diversity = len(unique_words) / len(words) if len(words) > 0 else 0
         except:
             lexical_diversity = type_token_ratio  # Fallback
         
         # Average word length
-        avg_word_length = sum(len(word) for word in words) / len(words)
+        avg_word_length = sum(len(word) for word in words) / len(words) if len(words) > 0 else 0
         
         # Vocabulary richness (unique words per 100 words)
-        vocabulary_richness = (len(unique_words) / len(words)) * 100
+        vocabulary_richness = (len(unique_words) / len(words)) * 100 if len(words) > 0 else 0
         
         # Word frequency distribution
         word_freq = Counter(words)
-        most_common_ratio = word_freq.most_common(1)[0][1] / len(words) if words else 0
+        most_common_ratio = word_freq.most_common(1)[0][1] / len(words) if len(words) > 0 else 0
         
         return {
             'type_token_ratio': type_token_ratio,
@@ -1514,7 +1514,7 @@ def calculate_mutual_information_features(df: pd.DataFrame, target_column: str =
     # Select numerical features
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df[col].dtype in ['int64', 'float64']:
+        if col != target_column and col != 'comment_text' and df[col].dtypes in ['int64', 'float64']:
             numerical_features.append(col)
     
     if not numerical_features:
@@ -1628,7 +1628,7 @@ def calculate_recursive_feature_elimination_features(df: pd.DataFrame, target_co
     # Select numerical features
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df[col].dtype in ['int64', 'float64']:
+        if col != target_column and col != 'comment_text' and df[col].dtypes in ['int64', 'float64']:
             numerical_features.append(col)
     
     if len(numerical_features) < 5:
@@ -1693,7 +1693,7 @@ def calculate_feature_selection_engineering_features(df: pd.DataFrame, target_co
     # Get numerical feature columns
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df[col].dtype in ['int64', 'float64']:
+        if col != target_column and col != 'comment_text' and df[col].dtypes in ['int64', 'float64']:
             numerical_features.append(col)
     
     # 1. Feature interaction terms
