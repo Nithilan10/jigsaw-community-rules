@@ -263,7 +263,7 @@ class CustomDataset(Dataset):
         # Get all numerical features dynamically
         numerical_cols = [col for col in df.columns 
                          if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule'] 
-                         and df[col].dtype in ['int64', 'float64']]
+                         and str(df.dtypes[col]) in ['int64', 'float64']]
         
         self.numerical = torch.tensor(df[numerical_cols].values, dtype=torch.float32)
         
@@ -608,7 +608,7 @@ def train_model():
                     print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
                     print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
                     raise e
-                
+            
                 # Standard backward pass
                 loss.backward()
                 
@@ -617,7 +617,7 @@ def train_model():
                     torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
                 
                 # Optimizer step
-            optimizer.step()
+                optimizer.step()
             
             # Learning rate scheduling
             if scheduler is not None:
