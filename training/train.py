@@ -659,4 +659,4 @@ if __name__ == '__main__':
     elif SPD_MODE:
         train_with_spd()
     else:
-        train_model()
+    train_model()
