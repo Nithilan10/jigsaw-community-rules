@@ -1514,8 +1514,13 @@ def calculate_mutual_information_features(df: pd.DataFrame, target_column: str =
     # Select numerical features
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df.dtypes[col] in ['int64', 'float64']:
-            numerical_features.append(col)
+        if col != target_column and col != 'comment_text':
+            try:
+                col_dtype = str(df[col].dtype)
+                if col_dtype in ['int64', 'float64']:
+                    numerical_features.append(col)
+            except:
+                continue
     
     if not numerical_features:
         print("No numerical features found for mutual information calculation")
@@ -1628,8 +1633,13 @@ def calculate_recursive_feature_elimination_features(df: pd.DataFrame, target_co
     # Select numerical features
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df.dtypes[col] in ['int64', 'float64']:
-            numerical_features.append(col)
+        if col != target_column and col != 'comment_text':
+            try:
+                col_dtype = str(df[col].dtype)
+                if col_dtype in ['int64', 'float64']:
+                    numerical_features.append(col)
+            except:
+                continue
     
     if len(numerical_features) < 5:
         print("Not enough numerical features for RFE")
@@ -1693,8 +1703,14 @@ def calculate_feature_selection_engineering_features(df: pd.DataFrame, target_co
     # Get numerical feature columns
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df.dtypes[col] in ['int64', 'float64']:
-            numerical_features.append(col)
+        if col != target_column and col != 'comment_text':
+            try:
+                col_dtype = str(df[col].dtype)
+                if col_dtype in ['int64', 'float64']:
+                    numerical_features.append(col)
+            except:
+                # Skip columns that can't be processed
+                continue
     
     # 1. Feature interaction terms
     df = extract_feature_interaction_terms(df, numerical_features)
