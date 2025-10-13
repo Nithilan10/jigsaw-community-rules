@@ -59,6 +59,9 @@ USE_LABEL_SMOOTHING = True         # Enable label smoothing
 USE_MIXUP_AUGMENTATION = False     # Enable mixup data augmentation
 USE_ADVANCED_REGULARIZATION = True # Enable advanced regularization
 
+# --- Performance Configuration ---
+ENABLE_SPACY_FEATURES = False      # Enable spaCy POS/dependency features (very slow)
+
 # Advanced Loss Configuration
 LABEL_SMOOTHING_FACTOR = 0.1       # Label smoothing factor
 MIXUP_ALPHA = 0.2                  # Mixup alpha parameter
@@ -424,7 +427,8 @@ def train_model():
     # We pass df_to_process=train_df_raw and file_path=None to signal using the DataFrame
     train_df_processed, tfidf_model, mean_vectors, scaler = preprocess_data(
         file_path=None, 
-        df_to_process=train_df_raw
+        df_to_process=train_df_raw,
+        enable_spacy=ENABLE_SPACY_FEATURES
     )
     
     # Update NUM_NUMERICAL_FEATURES based on actual processed data
@@ -442,7 +446,8 @@ def train_model():
         df_to_process=validation_df_raw,
         tfidf_model=tfidf_model,
         mean_vectors=mean_vectors,
-        scaler=scaler
+        scaler=scaler,
+        enable_spacy=ENABLE_SPACY_FEATURES
     )
     
     # Check for empty dataframes after preprocessing (in case of a processing error)
@@ -509,10 +514,10 @@ def train_model():
         )
     else:
         print("Using Custom Cost Sensitive Loss Function")
-        criterion = CustomCostSensitiveLoss(
-            rule_weights=RULE_WEIGHTS, 
-            feature_weights=FEATURE_WEIGHTS
-        )
+    criterion = CustomCostSensitiveLoss(
+        rule_weights=RULE_WEIGHTS, 
+        feature_weights=FEATURE_WEIGHTS
+    )
 
     # Enhanced optimizer with better parameters
     optimizer = torch.optim.AdamW(

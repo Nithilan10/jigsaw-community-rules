@@ -463,11 +463,10 @@ def extract_lexical_diversity_features(text: str) -> dict:
         
         # Lexical Diversity (using spaCy for lemmatization)
         try:
-            nlp = spacy.load("en_core_web_sm")
-            doc = nlp(text)
-            lemmas = [token.lemma_ for token in doc if not token.is_stop and not token.is_punct and not token.is_space]
-            unique_lemmas = set(lemmas)
-            lexical_diversity = len(unique_lemmas) / len(lemmas) if lemmas else 0
+            # Simple lexical diversity without spaCy dependency
+            words = [word.lower() for word in text.split() if word.isalpha()]
+            unique_words = set(words)
+            lexical_diversity = len(unique_words) / len(words) if words else 0
         except:
             lexical_diversity = type_token_ratio  # Fallback
         
@@ -503,39 +502,52 @@ def get_empty_lexical_features() -> dict:
         'most_common_word_ratio': 0.0
     }
 
-def calculate_advanced_text_features(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_advanced_text_features(df: pd.DataFrame, enable_spacy: bool = False) -> pd.DataFrame:
     """
     Calculate all advanced text features (POS, dependency, readability, lexical diversity)
     """
     print("Calculating advanced text features...")
     
-    # Load spaCy model
-    try:
-        nlp = spacy.load("en_core_web_sm")
-    except OSError:
-        print("Warning: spaCy model not found. Using fallback features.")
-        nlp = None
+    # Load spaCy model only if enabled (it's very slow)
+    nlp = None
+    if enable_spacy:
+        try:
+            nlp = spacy.load("en_core_web_sm")
+            print("spaCy model loaded successfully")
+        except OSError:
+            print("Warning: spaCy model not found. Using fallback features.")
+            nlp = None
+    else:
+        print("spaCy features disabled for performance. Using fallback features.")
     
     all_features = []
     
     for idx, row in df.iterrows():
         text = row['comment_text']
         
+        if idx % 1000 == 0:
+            print(f"Processing text {idx}/{len(df)}")
+        
         # Combine all advanced features
         features = {}
         
-        # POS and dependency features (if spaCy available)
-        if nlp:
-            features.update(extract_pos_features(text, nlp))
-            features.update(extract_dependency_features(text, nlp))
+        # POS and dependency features (if spaCy available and enabled)
+        if nlp and enable_spacy:
+            try:
+                features.update(extract_pos_features(text, nlp))
+                features.update(extract_dependency_features(text, nlp))
+            except Exception as e:
+                print(f"Error processing text {idx} with spaCy: {e}")
+                features.update(get_empty_pos_features())
+                features.update(get_empty_dependency_features())
         else:
             features.update(get_empty_pos_features())
             features.update(get_empty_dependency_features())
         
-        # Readability features
+        # Readability features (fast)
         features.update(extract_readability_features(text))
         
-        # Lexical diversity features
+        # Lexical diversity features (fast)
         features.update(extract_lexical_diversity_features(text))
         
         all_features.append(features)
@@ -1896,10 +1908,10 @@ def calculate_simple_features(df: pd.DataFrame, scaler: RobustScaler = None) -> 
     # More robust length calculation (character and word count)
     df['comment_length'] = df['comment_text'].apply(lambda x: len(x.split()))
     df['comment_char_length'] = df['comment_text'].apply(lambda x: len(x))
-    
+
     # Enhanced exclamation frequency with better normalization
     df['exclamation_frequency'] = df['comment_text'].apply(_get_exclamation_frequency)
-    
+
     # Additional text quality features
     df['avg_word_length'] = df['comment_text'].apply(lambda x: np.mean([len(word) for word in x.split()]) if x.split() else 0)
     df['punctuation_ratio'] = df['comment_text'].apply(lambda x: sum(1 for c in x if c in '!?.,;:') / len(x) if len(x) > 0 else 0)
@@ -2071,7 +2083,8 @@ def preprocess_data(
     tfidf_params: Dict[str, Any] = None,
     tfidf_model: TfidfVectorizer = None,
     mean_vectors: Dict[str, Any] = None,
-    scaler: MinMaxScaler = None
+    scaler: MinMaxScaler = None,
+    enable_spacy: bool = False
 ) -> Tuple[pd.DataFrame, TfidfVectorizer, Dict[str, Any], MinMaxScaler]:
     """
     Orchestrates the loading, feature engineering, and scaling of the data.
@@ -2200,7 +2213,7 @@ def preprocess_data(
     df = calculate_context_aware_stylometric_features(df)
     
     # 8. Calculate Advanced Text Features (POS, Dependency, Readability, Lexical Diversity)
-    df = calculate_advanced_text_features(df)
+    df = calculate_advanced_text_features(df, enable_spacy=enable_spacy)
     
     # 9. Calculate Domain-Specific Features (Legal/Brand Recognition, Sentiment, Formality, Questions)
     df = calculate_domain_specific_features(df)
