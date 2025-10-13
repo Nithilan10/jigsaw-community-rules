@@ -1733,6 +1733,71 @@ def calculate_feature_selection_engineering_features(df: pd.DataFrame, target_co
     print("Feature selection and engineering features completed")
     return df
 
+def calculate_rule_patterns_simple(pos_examples: list, neg_examples: list, tfidf_model: TfidfVectorizer) -> dict:
+    """
+    Calculate simple rule patterns for positive and negative examples
+    """
+    try:
+        # Transform examples to TF-IDF vectors
+        pos_vectors = tfidf_model.transform(pos_examples)
+        neg_vectors = tfidf_model.transform(neg_examples)
+        
+        # Calculate median vectors
+        pos_median = np.median(pos_vectors.toarray(), axis=0)
+        neg_median = np.median(neg_vectors.toarray(), axis=0)
+        
+        # Calculate difference vector
+        difference_vector = pos_median - neg_median
+        
+        # Calculate variance
+        pos_variance = np.var(pos_vectors.toarray(), axis=0)
+        neg_variance = np.var(neg_vectors.toarray(), axis=0)
+        
+        # Calculate average similarities (simplified)
+        pos_similarities = []
+        neg_similarities = []
+        
+        # Sample a few examples for similarity calculation to avoid hanging
+        sample_size = min(20, len(pos_examples))
+        for i in range(sample_size):
+            for j in range(i+1, sample_size):
+                if i < len(pos_vectors) and j < len(pos_vectors):
+                    sim = cosine_similarity(pos_vectors[i:i+1], pos_vectors[j:j+1])[0][0]
+                    pos_similarities.append(sim)
+        
+        sample_size = min(20, len(neg_examples))
+        for i in range(sample_size):
+            for j in range(i+1, sample_size):
+                if i < len(neg_vectors) and j < len(neg_vectors):
+                    sim = cosine_similarity(neg_vectors[i:i+1], neg_vectors[j:j+1])[0][0]
+                    neg_similarities.append(sim)
+        
+        return {
+            'pos_median': pos_median,
+            'neg_median': neg_median,
+            'difference_vector': difference_vector,
+            'pos_variance': pos_variance,
+            'neg_variance': neg_variance,
+            'pos_avg_similarity': np.mean(pos_similarities) if pos_similarities else 0,
+            'neg_avg_similarity': np.mean(neg_similarities) if neg_similarities else 0,
+            'pos_consistency': 1 - np.std(pos_similarities) if pos_similarities else 0,
+            'neg_consistency': 1 - np.std(neg_similarities) if neg_similarities else 0
+        }
+    except Exception as e:
+        print(f"Error in calculate_rule_patterns_simple: {e}")
+        # Return empty patterns
+        return {
+            'pos_median': np.zeros(5000),  # Default size
+            'neg_median': np.zeros(5000),
+            'difference_vector': np.zeros(5000),
+            'pos_variance': np.zeros(5000),
+            'neg_variance': np.zeros(5000),
+            'pos_avg_similarity': 0,
+            'neg_avg_similarity': 0,
+            'pos_consistency': 0,
+            'neg_consistency': 0
+        }
+
 def calculate_rule_specific_comparisons(df: pd.DataFrame, tfidf_model: TfidfVectorizer = None, mean_vectors: Dict[str, Any] = None) -> pd.DataFrame:
     """
     Calculate rule-specific comparison features between positive and negative examples for each rule
@@ -1785,7 +1850,11 @@ def calculate_rule_specific_comparisons(df: pd.DataFrame, tfidf_model: TfidfVect
             
         print(f"  Calculating patterns for {len(pos_examples)} positive and {len(neg_examples)} negative examples")
         try:
-            rule_patterns[rule] = calculate_rule_patterns(pos_examples, neg_examples, tfidf_model)
+            # Limit examples to prevent hanging (use first 100 of each)
+            pos_examples_limited = pos_examples[:100] if len(pos_examples) > 100 else pos_examples
+            neg_examples_limited = neg_examples[:100] if len(neg_examples) > 100 else neg_examples
+            
+            rule_patterns[rule] = calculate_rule_patterns_simple(pos_examples_limited, neg_examples_limited, tfidf_model)
             print(f"  Completed rule '{rule}'")
         except Exception as e:
             print(f"  Error processing rule '{rule}': {e}")
