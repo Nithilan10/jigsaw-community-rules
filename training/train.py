@@ -19,7 +19,8 @@ from collections import Counter
 # NOTE: The import below assumes your data_preprocessing file is named 'preprocess.py'
 from preprocess import preprocess_data
 from custom_model import CustomTransformerModel
-from custom_loss import CustomCostSensitiveLoss, SGDAOptimizer, OGDAOptimizer, RobustLoss
+from custom_loss import (CustomCostSensitiveLoss, SGDAOptimizer, OGDAOptimizer, RobustLoss,
+                        LabelSmoothingLoss, MixupLoss, AdvancedRegularizationLoss, CombinedAdvancedLoss)
 
 # --- 0. Configuration and Constants ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -38,27 +39,12 @@ RANDOM_SEED = 42
 USE_LEARNING_RATE_SCHEDULING = True  # Enable LR scheduling
 USE_EARLY_STOPPING = True           # Enable early stopping
 USE_GRADIENT_CLIPPING = True        # Enable gradient clipping
-USE_MIXED_PRECISION = True          # Enable mixed precision training
+USE_MIXED_PRECISION = False         # Enable mixed precision training
 EARLY_STOPPING_PATIENCE = 3         # Stop if no improvement for 3 epochs
 GRADIENT_CLIP_NORM = 1.0           # Max gradient norm
 WARMUP_RATIO = 0.1                 # 10% of training for warmup
 
-# Hyperparameter Tuning Configuration
-HYPERPARAMETER_TUNING = True       # Set to True to enable hyperparameter tuning
-TUNING_MODE = 'random'             # Options: 'grid', 'random', 'bayesian'
-MAX_TUNING_TRIALS = 20             # Maximum number of trials for random/bayesian search
-TUNING_CV_FOLDS = 3                # Cross-validation folds for tuning
-
-# Hyperparameter Search Spaces
-HYPERPARAMETER_SPACES = {
-    'learning_rate': [1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5],
-    'batch_size': [4, 6, 8, 10, 12, 16],
-    'num_epochs': [3, 4, 5, 6, 7, 8],
-    'weight_decay': [0.0, 0.01, 0.05, 0.1, 0.2],
-    'dropout_rate': [0.1, 0.15, 0.2, 0.25, 0.3],
-    'warmup_ratio': [0.05, 0.1, 0.15, 0.2],
-    'gradient_clip_norm': [0.5, 1.0, 1.5, 2.0]
-}
+# Removed hyperparameter tuning - focusing on feature engineering instead
 
 # Class Imbalance Handling
 USE_CLASS_WEIGHTING = True         # Enable class weighting
@@ -67,52 +53,90 @@ USE_SMOTE = False                  # Enable SMOTE (synthetic minority oversampli
 FOCAL_LOSS_ALPHA = 0.25            # Focal loss alpha parameter
 FOCAL_LOSS_GAMMA = 2.0             # Focal loss gamma parameter
 
-# Ensemble configuration
-ENSEMBLE_MODE = False  # Set to True to train multiple models
+# Advanced Loss Function Parameters
+USE_ADVANCED_LOSS = True           # Enable advanced loss functions
+USE_LABEL_SMOOTHING = True         # Enable label smoothing
+USE_MIXUP_AUGMENTATION = False     # Enable mixup data augmentation
+USE_ADVANCED_REGULARIZATION = True # Enable advanced regularization
 
-# SPD (Stochastic Primal-Dual) configuration
-SPD_MODE = False  # Set to True to use SPD optimization
-SPD_METHOD = 'SGDA'  # Options: 'SGDA', 'OGDA'
-SPD_LR_PRIMAL = 1e-5  # Learning rate for primal variables (model parameters)
-SPD_LR_DUAL = 1e-4   # Learning rate for dual variables (Lagrange multipliers)
-ENSEMBLE_MODELS = {
-    'deberta_v3_base': {
-        'name': 'microsoft/deberta-v3-base',
-        'batch_size': 6,
-        'learning_rate': 5e-6,
-        'epochs': 3,
-        'weight': 0.4
-    },
-    'roberta_base': {
-        'name': 'roberta-base',
-        'batch_size': 8,
-        'learning_rate': 1e-5,
-        'epochs': 3,
-        'weight': 0.3
-    },
-    'deberta_base': {
-        'name': 'microsoft/deberta-base',
-        'batch_size': 8,
-        'learning_rate': 1e-5,
-        'epochs': 3,
-        'weight': 0.2
-    },
-    'bert_base': {
-        'name': 'bert-base-uncased',
-        'batch_size': 10,
-        'learning_rate': 2e-5,
-        'epochs': 3,
-        'weight': 0.1
-    }
-}
+# Advanced Loss Configuration
+LABEL_SMOOTHING_FACTOR = 0.1       # Label smoothing factor
+MIXUP_ALPHA = 0.2                  # Mixup alpha parameter
+WEIGHT_DECAY = 1e-4                # Weight decay coefficient
+GRADIENT_PENALTY_WEIGHT = 0.1      # Gradient penalty weight
+
+# Removed ensemble and SPD - focusing on single model + features
 
 # This list must exactly match the order of features created in data_preprocessing.py
 NUMERICAL_FEATURES = [
-    'comment_length', 'exclamation_frequency', 
+    'exclamation_frequency', 
     'legal_advice_interaction_feature', 'promo_persuasion_feature', 
-    'similarity_to_violation', 'similarity_to_safe', 'consistency_deviation', 'boundary_proximity_score'
+    'similarity_to_violation', 'similarity_to_safe', 'consistency_deviation', 'boundary_proximity_score',
+    # Context-aware stylometric features (30 features: 10 base features × 3 comparison types)
+    'exclamation_ratio_violation_vs_safe_diff', 'exclamation_ratio_violation_vs_safe_ratio', 'exclamation_ratio_violation_zscore',
+    'question_ratio_violation_vs_safe_diff', 'question_ratio_violation_vs_safe_ratio', 'question_ratio_violation_zscore',
+    'period_ratio_violation_vs_safe_diff', 'period_ratio_violation_vs_safe_ratio', 'period_ratio_violation_zscore',
+    'uppercase_ratio_violation_vs_safe_diff', 'uppercase_ratio_violation_vs_safe_ratio', 'uppercase_ratio_violation_zscore',
+    'title_case_ratio_violation_vs_safe_diff', 'title_case_ratio_violation_vs_safe_ratio', 'title_case_ratio_violation_zscore',
+    'short_word_ratio_violation_vs_safe_diff', 'short_word_ratio_violation_vs_safe_ratio', 'short_word_ratio_violation_zscore',
+    'long_word_ratio_violation_vs_safe_diff', 'long_word_ratio_violation_vs_safe_ratio', 'long_word_ratio_violation_zscore',
+    'avg_sentence_length_violation_vs_safe_diff', 'avg_sentence_length_violation_vs_safe_ratio', 'avg_sentence_length_violation_zscore',
+    'punctuation_density_violation_vs_safe_diff', 'punctuation_density_violation_vs_safe_ratio', 'punctuation_density_violation_zscore',
+    'capitalization_ratio_violation_vs_safe_diff', 'capitalization_ratio_violation_vs_safe_ratio', 'capitalization_ratio_violation_zscore',
+    # Advanced text features (filtered for high discrimination)
+    # High-value POS features (8 features)
+    'pos_adj_ratio', 'pos_adv_ratio', 'pos_aux_ratio', 'pos_conj_ratio', 'pos_intj_ratio', 'pos_pron_ratio', 'pos_propn_ratio', 'pos_verb_ratio',
+    # Dependency features (4 features)
+    'has_imperative', 'has_conditional', 'has_negation', 'has_auxiliary',
+    # Readability features (4 features)
+    'flesch_kincaid', 'gunning_fog', 'flesch_reading_ease', 'smog_index',
+    # Lexical diversity features (4 features)
+    'type_token_ratio', 'lexical_diversity', 'vocabulary_richness', 'most_common_word_ratio',
+    # Domain-specific features (24 features)
+    # Legal/Brand recognition features (10 features)
+    'legal_terms_count', 'legal_terms_density', 'brand_mentions_count', 'brand_mentions_density',
+    'lawsuit_patterns_count', 'has_lawsuit_patterns', 'legal_references_count', 'has_legal_references',
+    'legal_advice_indicators', 'has_legal_advice',
+    # Sentiment features (6 features)
+    'positive_sentiment_count', 'negative_sentiment_count', 'positive_sentiment_ratio', 'negative_sentiment_ratio',
+    'sentiment_polarity', 'emotional_intensity',
+    # Formality features (7 features)
+    'formal_words_count', 'informal_words_count', 'contractions_count', 'formal_words_ratio',
+    'informal_words_ratio', 'contractions_ratio', 'formality_score',
+    # Question pattern features (6 features)
+    'question_marks_count', 'has_questions', 'question_words_count', 'question_words_ratio',
+    'rhetorical_questions_count', 'has_rhetorical_questions',
+    # Specificity features (17 features)
+    'email_count', 'phone_count', 'url_count', 'contact_info_count', 'specific_action_count',
+    'specific_number_count', 'specific_location_count', 'generic_phrase_count', 'specific_phrase_count',
+    'contact_info_density', 'specific_action_density', 'specific_number_density', 'specific_location_density',
+    'generic_phrase_density', 'specific_phrase_density', 'overall_specificity_score',
+    # Advanced text processing features (48 features)
+    # Advanced TF-IDF features (12 features)
+    'standard_tfidf_sum', 'standard_tfidf_mean', 'standard_tfidf_max', 'standard_tfidf_std',
+    'sublinear_tfidf_sum', 'sublinear_tfidf_mean', 'sublinear_tfidf_max', 'sublinear_tfidf_std',
+    'bm25_sum', 'bm25_mean', 'bm25_max', 'bm25_std',
+    # Word embedding features (18 features)
+    'avg_word_length', 'max_word_length', 'min_word_length', 'word_length_std',
+    'char_count', 'char_count_no_spaces', 'digit_count', 'alpha_count', 'special_char_count',
+    'unique_words', 'total_words', 'word_diversity', 'most_frequent_word_count',
+    'bigram_count', 'trigram_count', 'unique_bigrams', 'unique_trigrams',
+    # Text augmentation features (8 features)
+    'synonym_pattern_count', 'translation_pattern_count', 'repeated_words_count', 'frequent_words_count',
+    'sentence_count', 'avg_sentence_length', 'complex_word_count', 'complex_word_ratio',
+    # BERT sentence features (11 features)
+    'sentence_count', 'avg_sentence_length', 'max_sentence_length', 'min_sentence_length', 'sentence_length_std',
+    'paragraph_count', 'avg_paragraph_length', 'max_paragraph_length', 'min_paragraph_length', 'paragraph_length_std',
+    'bigram_diversity',
+    # Rule-specific comparison features (12 features)
+    'rule_pos_similarity', 'rule_neg_similarity', 'rule_similarity_diff', 'rule_similarity_ratio',
+    'rule_diff_alignment', 'rule_pos_consistency', 'rule_neg_consistency', 'rule_consistency_diff',
+    'rule_pos_var_alignment', 'rule_neg_var_alignment', 'rule_var_alignment_diff', 'rule_violation_score'
+    # Note: Feature selection & engineering features are dynamically generated and will be added automatically
 ]
-NUM_NUMERICAL_FEATURES = len(NUMERICAL_FEATURES)
+
+# Dynamic feature count will be calculated at runtime
+NUM_NUMERICAL_FEATURES = len(NUMERICAL_FEATURES)  # Base count, will be updated dynamically
 
 # Custom Loss Weights (Reduced to prevent instability)
 RULE_WEIGHTS = {
@@ -158,52 +182,7 @@ class EarlyStopping:
                 return True  # Stop training
             return False  # Continue training
 
-class HyperparameterTuner:
-    """
-    Hyperparameter tuning utility for transformer models.
-    """
-    def __init__(self, search_space: dict, mode: str = 'random', max_trials: int = 20):
-        self.search_space = search_space
-        self.mode = mode
-        self.max_trials = max_trials
-        self.trial_results = []
-        
-    def generate_hyperparameters(self) -> dict:
-        """Generate hyperparameters based on search mode."""
-        if self.mode == 'grid':
-            return self._grid_search()
-        elif self.mode == 'random':
-            return self._random_search()
-        else:
-            raise ValueError(f"Unknown search mode: {self.mode}")
-    
-    def _random_search(self) -> dict:
-        """Generate random hyperparameters from search space."""
-        params = {}
-        for param_name, param_values in self.search_space.items():
-            params[param_name] = random.choice(param_values)
-        return params
-    
-    def _grid_search(self) -> dict:
-        """Generate hyperparameters using grid search."""
-        # This would be more complex for full grid search
-        # For now, return random search
-        return self._random_search()
-    
-    def add_trial_result(self, params: dict, score: float):
-        """Add a trial result."""
-        self.trial_results.append({
-            'params': params,
-            'score': score
-        })
-    
-    def get_best_params(self) -> dict:
-        """Get the best hyperparameters found so far."""
-        if not self.trial_results:
-            return {}
-        
-        best_trial = max(self.trial_results, key=lambda x: x['score'])
-        return best_trial['params']
+# Removed HyperparameterTuner - focusing on single model training
 
 def calculate_class_weights(labels: np.ndarray) -> dict:
     """
@@ -304,7 +283,16 @@ class ToxicityDataset(Dataset):
 
 # --- 2. Evaluation Function (For AUC Metric) ---
 
-def evaluate_model(model, dataloader, device=DEVICE) -> Tuple[float, np.ndarray]:
+def find_optimal_threshold(y_true, y_scores):
+    """Find the optimal threshold for the given true labels and predicted scores."""
+    from sklearn.metrics import roc_curve, auc
+    import numpy as np
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+    j_scores = tpr - fpr
+    optimal_idx = np.argmax(j_scores)
+    return thresholds[optimal_idx]
+
+def evaluate_model(model, dataloader, device=DEVICE, find_optimal_threshold=False) -> Tuple[float, np.ndarray, float]:
     """Calculates Column-Averaged AUC and individual AUCs on the validation set."""
     model.eval()
     all_labels = []
@@ -329,6 +317,11 @@ def evaluate_model(model, dataloader, device=DEVICE) -> Tuple[float, np.ndarray]
     # Concatenate all results
     labels = np.concatenate(all_labels)
     probs = np.concatenate(all_probs)
+
+    optimal_threshold = 0.5
+    if find_optimal_threshold:
+        optimal_threshold = find_optimal_threshold(labels, probs)
+        print(f"Optimal threshold: {optimal_threshold}")
     
     auc_scores = []
     for i in range(NUM_RULES):
@@ -341,7 +334,35 @@ def evaluate_model(model, dataloader, device=DEVICE) -> Tuple[float, np.ndarray]
             auc_scores.append(0.5) 
 
     column_averaged_auc = np.mean(auc_scores)
-    return column_averaged_auc, np.array(auc_scores)
+    return column_averaged_auc, np.array(auc_scores), optimal_threshold
+
+def predict_with_optimal_threshold(model, dataloader, device=DEVICE, threshold=None):
+    """
+    Make predictions using optimal threshold instead of default 0.5
+    """
+    model.eval()
+    all_predictions = []
+    
+    # Use provided threshold or model's stored threshold
+    if threshold is None:
+        threshold = getattr(model, 'optimal_threshold', 0.5)
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            numerical_features = batch['numerical_features'].to(device)
+
+            # Forward pass
+            logits = model(input_ids, attention_mask, numerical_features)
+            
+            # Apply sigmoid and threshold
+            probs = torch.sigmoid(logits).cpu().numpy()
+            predictions = (probs > threshold).astype(int)
+            
+            all_predictions.append(predictions)
+    
+    return np.concatenate(all_predictions)
 
 
 # --- 3. Main Training Function ---
@@ -395,6 +416,14 @@ def train_model():
         file_path=None, 
         df_to_process=train_df_raw
     )
+    
+    # Update NUM_NUMERICAL_FEATURES based on actual processed data
+    global NUM_NUMERICAL_FEATURES
+    actual_numerical_features = [col for col in train_df_processed.columns 
+                                if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule'] 
+                                and train_df_processed[col].dtype in ['int64', 'float64']]
+    NUM_NUMERICAL_FEATURES = len(actual_numerical_features)
+    print(f"Updated NUM_NUMERICAL_FEATURES to {NUM_NUMERICAL_FEATURES} based on processed data")
 
     # B. Process the VALIDATION set (Uses fitted models to TRANSFORM only)
     print("Processing VALIDATION data (Transforming only)...")
@@ -456,10 +485,23 @@ def train_model():
     if DEVICE.type == 'cuda':
         print(f"GPU memory after model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
 
-    criterion = CustomCostSensitiveLoss(
-        rule_weights=RULE_WEIGHTS, 
-        feature_weights=FEATURE_WEIGHTS
-    )
+    # Initialize loss function based on configuration
+    if USE_ADVANCED_LOSS:
+        print("Using Combined Advanced Loss Function")
+        criterion = CombinedAdvancedLoss(
+            focal_alpha=FOCAL_LOSS_ALPHA,
+            focal_gamma=FOCAL_LOSS_GAMMA,
+            label_smoothing=LABEL_SMOOTHING_FACTOR,
+            weight_decay=WEIGHT_DECAY,
+            use_mixup=USE_MIXUP_AUGMENTATION,
+            mixup_alpha=MIXUP_ALPHA
+        )
+    else:
+        print("Using Custom Cost Sensitive Loss Function")
+        criterion = CustomCostSensitiveLoss(
+            rule_weights=RULE_WEIGHTS, 
+            feature_weights=FEATURE_WEIGHTS
+        )
 
     # Enhanced optimizer with better parameters
     optimizer = torch.optim.AdamW(
@@ -520,7 +562,11 @@ def train_model():
             if USE_MIXED_PRECISION:
                 with autocast():
                     logits = model(input_ids, attention_mask, numerical_features)
-                    loss = criterion(logits, labels, numerical_features)
+                    # Calculate loss based on loss function type
+                    if USE_ADVANCED_LOSS:
+                        loss = criterion(logits, labels, model=model)
+                    else:
+                        loss = criterion(logits, labels, numerical_features)
                 
                 # Backward pass with mixed precision
                 scaler.scale(loss).backward()
@@ -537,7 +583,11 @@ def train_model():
                 # Standard forward pass
                 logits = model(input_ids, attention_mask, numerical_features)
                 try:
-                    loss = criterion(logits, labels, numerical_features)
+                    # Calculate loss based on loss function type
+                    if USE_ADVANCED_LOSS:
+                        loss = criterion(logits, labels, model=model)
+                    else:
+                        loss = criterion(logits, labels, numerical_features)
                 except Exception as e:
                     print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
                     print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
@@ -551,7 +601,7 @@ def train_model():
                     torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
                 
                 # Optimizer step
-                optimizer.step()
+            optimizer.step()
             
             # Learning rate scheduling
             if scheduler is not None:
@@ -570,12 +620,16 @@ def train_model():
         avg_loss = total_loss / len(train_dataloader)
         
         # --- Validation and AUC Check ---
-        validation_auc, auc_per_rule = evaluate_model(model, validation_dataloader, DEVICE)
+        validation_auc, auc_per_rule, optimal_threshold = evaluate_model(model, validation_dataloader, DEVICE, find_optimal_threshold=True)
+        
+        # Store optimal threshold in model for later use
+        model.optimal_threshold = optimal_threshold
 
         print(f"\n--- Epoch {epoch+1} Complete ---")
         print(f"Average Training Loss: {avg_loss:.4f}")
         print(f"Validation Column-Averaged AUC: {validation_auc:.4f}")
         print(f"AUC Per Rule: {np.round(auc_per_rule, 4)}") # Display per-rule performance
+        print(f"Optimal Threshold: {optimal_threshold:.4f}")
         
         # Save best model for error analysis
         if validation_auc > best_auc:
@@ -592,12 +646,11 @@ def train_model():
     
     print(f"\nTraining complete. Best validation AUC: {best_auc:.4f}")
 
-def train_with_hyperparameter_tuning():
-    """
-    Train model with hyperparameter tuning.
-    """
-    print("Starting Hyperparameter Tuning")
-    print("="*60)
+# Removed all unnecessary functions - keeping only train_model()
+
+# --- Execute Script ---
+if __name__ == '__main__':
+    train_model()
     
     # Load and preprocess data
     try:
@@ -866,14 +919,14 @@ def train_single_trial(params: dict, train_df: pd.DataFrame, validation_df: pd.D
             total_loss += loss.item()
         
         # Validation (for early stopping)
-        validation_auc, _ = evaluate_model(model, validation_dataloader, DEVICE)
+        validation_auc, _, optimal_threshold = evaluate_model(model, validation_dataloader, DEVICE, find_optimal_threshold=True)
         
         if validation_auc > best_auc:
             best_auc = validation_auc
     
     # Final evaluation on test set (only if test data has labels)
     if 'rule_violation' in test_df.columns:
-        test_auc, _ = evaluate_model(model, test_dataloader, DEVICE)
+        test_auc, _, _ = evaluate_model(model, test_dataloader, DEVICE)
         print(f"    Final Test AUC: {test_auc:.4f}")
         return test_auc
     else:
@@ -973,7 +1026,7 @@ def train_ensemble_model(model_name: str, model_config: dict, train_df_processed
         
         # Validation phase
         avg_loss = total_loss / len(train_dataloader)
-        validation_auc, _ = evaluate_model(model, validation_dataloader, DEVICE)
+        validation_auc, _, optimal_threshold = evaluate_model(model, validation_dataloader, DEVICE, find_optimal_threshold=True)
         
         print(f"  Average Loss: {avg_loss:.4f}")
         print(f"  Validation AUC: {validation_auc:.4f}")
@@ -1377,7 +1430,7 @@ def train_with_spd():
         # Validation
         avg_primal_loss = total_primal_loss / len(train_dataloader)
         avg_dual_loss = total_dual_loss / len(train_dataloader)
-        validation_auc, _ = evaluate_model(model, validation_dataloader, DEVICE)
+        validation_auc, _, optimal_threshold = evaluate_model(model, validation_dataloader, DEVICE, find_optimal_threshold=True)
         
         print(f"\nEpoch {epoch+1} Summary:")
         print(f"  Average Primal Loss: {avg_primal_loss:.4f}")
@@ -1404,4 +1457,4 @@ if __name__ == '__main__':
     elif SPD_MODE:
         train_with_spd()
     else:
-        train_model()
+    train_model()
