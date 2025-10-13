@@ -435,7 +435,7 @@ def train_model():
     global NUM_NUMERICAL_FEATURES
     actual_numerical_features = [col for col in train_df_processed.columns 
                                 if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule'] 
-                                and train_df_processed[col].dtype in ['int64', 'float64']]
+                                and str(train_df_processed.dtypes[col]) in ['int64', 'float64']]
     NUM_NUMERICAL_FEATURES = len(actual_numerical_features)
     print(f"Updated NUM_NUMERICAL_FEATURES to {NUM_NUMERICAL_FEATURES} based on processed data")
 
