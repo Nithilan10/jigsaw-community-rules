@@ -1575,8 +1575,14 @@ def calculate_dimensionality_reduction_features(df: pd.DataFrame) -> pd.DataFram
     # Select numerical features
     numerical_features = []
     for col in df.columns:
-        if col != 'comment_text' and df[col].dtype in ['int64', 'float64']:
-            numerical_features.append(col)
+        if col != 'comment_text':
+            try:
+                col_dtype = str(df[col].dtype)
+                if col_dtype in ['int64', 'float64']:
+                    numerical_features.append(col)
+            except:
+                # Skip columns that can't be processed
+                continue
     
     if len(numerical_features) < 2:
         print("Not enough numerical features for dimensionality reduction")
