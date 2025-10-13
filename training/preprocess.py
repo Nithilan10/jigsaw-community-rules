@@ -381,7 +381,7 @@ def get_empty_dependency_features() -> dict:
 
 def extract_readability_features(text: str) -> dict:
     """
-    Extract readability metrics using textstat
+    Extract readability metrics using textstat with fallback handling
     """
     if not isinstance(text, str) or not text.strip():
         return get_empty_readability_features()
@@ -389,23 +389,44 @@ def extract_readability_features(text: str) -> dict:
     try:
         features = {}
         
-        # Flesch-Kincaid Grade Level
-        features['flesch_kincaid'] = textstat.flesch_kincaid(text)
+        # Flesch-Kincaid Grade Level (try different function names)
+        try:
+            features['flesch_kincaid'] = textstat.flesch_kincaid_grade(text)
+        except AttributeError:
+            try:
+                features['flesch_kincaid'] = textstat.flesch_kincaid(text)
+            except AttributeError:
+                features['flesch_kincaid'] = 0.0
         
         # Gunning Fog Index
-        features['gunning_fog'] = textstat.gunning_fog(text)
+        try:
+            features['gunning_fog'] = textstat.gunning_fog(text)
+        except AttributeError:
+            features['gunning_fog'] = 0.0
         
         # Flesch Reading Ease
-        features['flesch_reading_ease'] = textstat.flesch_reading_ease(text)
+        try:
+            features['flesch_reading_ease'] = textstat.flesch_reading_ease(text)
+        except AttributeError:
+            features['flesch_reading_ease'] = 0.0
         
         # SMOG Index
-        features['smog_index'] = textstat.smog_index(text)
+        try:
+            features['smog_index'] = textstat.smog_index(text)
+        except AttributeError:
+            features['smog_index'] = 0.0
         
         # Average sentence length
-        features['avg_sentence_length_readability'] = textstat.avg_sentence_length(text)
+        try:
+            features['avg_sentence_length_readability'] = textstat.avg_sentence_length(text)
+        except AttributeError:
+            features['avg_sentence_length_readability'] = 0.0
         
         # Syllable count per word
-        features['avg_syllables_per_word'] = textstat.avg_syllables_per_word(text)
+        try:
+            features['avg_syllables_per_word'] = textstat.avg_syllables_per_word(text)
+        except AttributeError:
+            features['avg_syllables_per_word'] = 0.0
         
         return features
         
