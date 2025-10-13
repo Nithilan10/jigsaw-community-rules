@@ -1514,7 +1514,7 @@ def calculate_mutual_information_features(df: pd.DataFrame, target_column: str =
     # Select numerical features
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df[col].dtypes in ['int64', 'float64']:
+        if col != target_column and col != 'comment_text' and df[col].dtype in ['int64', 'float64']:
             numerical_features.append(col)
     
     if not numerical_features:
@@ -1628,7 +1628,7 @@ def calculate_recursive_feature_elimination_features(df: pd.DataFrame, target_co
     # Select numerical features
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df[col].dtypes in ['int64', 'float64']:
+        if col != target_column and col != 'comment_text' and df[col].dtype in ['int64', 'float64']:
             numerical_features.append(col)
     
     if len(numerical_features) < 5:
@@ -1693,7 +1693,7 @@ def calculate_feature_selection_engineering_features(df: pd.DataFrame, target_co
     # Get numerical feature columns
     numerical_features = []
     for col in df.columns:
-        if col != target_column and col != 'comment_text' and df[col].dtypes in ['int64', 'float64']:
+        if col != target_column and col != 'comment_text' and df[col].dtype in ['int64', 'float64']:
             numerical_features.append(col)
     
     # 1. Feature interaction terms
