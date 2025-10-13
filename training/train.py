@@ -281,8 +281,15 @@ class CustomDataset(Dataset):
         return len(self.texts)
 
     def __getitem__(self, idx):
+        # Ensure text is a string and handle NaN/None values
+        text = self.texts[idx]
+        if pd.isna(text) or text is None:
+            text = ""
+        else:
+            text = str(text)
+        
         encoding = self.tokenizer(
-            self.texts[idx], 
+            text, 
             padding='max_length', 
             truncation=True, 
             max_length=self.max_length,
@@ -576,7 +583,7 @@ def train_model():
             # Forward pass with mixed precision
             if USE_MIXED_PRECISION:
                 with autocast():
-                    logits = model(input_ids, attention_mask, numerical_features)
+            logits = model(input_ids, attention_mask, numerical_features)
                     # Calculate loss based on loss function type
                     if USE_ADVANCED_LOSS:
                         loss = criterion(logits, labels, model=model)
@@ -602,21 +609,21 @@ def train_model():
                     if USE_ADVANCED_LOSS:
                         loss = criterion(logits, labels, model=model)
                     else:
-                        loss = criterion(logits, labels, numerical_features)
-                except Exception as e:
-                    print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
-                    print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
-                    raise e
+                loss = criterion(logits, labels, numerical_features)
+            except Exception as e:
+                print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
+                print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                raise e
             
                 # Standard backward pass
-                loss.backward()
+            loss.backward()
                 
                 # Gradient clipping
                 if USE_GRADIENT_CLIPPING:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
                 
                 # Optimizer step
-                optimizer.step()
+            optimizer.step()
             
             # Learning rate scheduling
             if scheduler is not None:
@@ -674,4 +681,4 @@ if __name__ == '__main__':
     elif SPD_MODE:
         train_with_spd()
     else:
-        train_model()
+    train_model()
