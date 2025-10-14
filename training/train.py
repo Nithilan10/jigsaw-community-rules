@@ -261,10 +261,11 @@ class CustomDataset(Dataset):
         
         # Handle the actual label column 'rule_violation' from the CSV
         if 'rule_violation' in df.columns:
-            self.labels = torch.tensor(df['rule_violation'].values, dtype=torch.long).unsqueeze(1)
+            # Convert labels to float32 for compatibility with loss functions
+            self.labels = torch.tensor(df['rule_violation'].values, dtype=torch.float32).unsqueeze(1)
         else:
             # Fallback to rule_ columns if they exist
-            self.labels = torch.tensor(df.filter(regex='rule_').values, dtype=torch.long)
+            self.labels = torch.tensor(df.filter(regex='rule_').values, dtype=torch.float32)
         
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -568,6 +569,9 @@ def train_model():
             numerical_features = batch['numerical_features'].to(DEVICE)
             labels = batch['labels'].to(DEVICE)
 
+            # Ensure labels are float32 for loss computation
+            labels = labels.float()
+
             optimizer.zero_grad()
             
             # Forward pass with mixed precision
@@ -603,6 +607,7 @@ def train_model():
                 except Exception as e:
                     print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
                     print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                    print(f"Logits dtype: {logits.dtype}, Labels dtype: {labels.dtype}")
                     raise e
             
                 # Standard backward pass
