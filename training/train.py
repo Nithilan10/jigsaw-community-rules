@@ -11,6 +11,11 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from typing import Tuple
 from torch.cuda.amp import autocast, GradScaler
 from collections import Counter
+import os
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
 
 # Import custom modules
 # NOTE: The import below assumes your data_preprocessing file is named 'preprocess.py'
@@ -79,6 +84,9 @@ LIGHTGBM_PARAMS = {
 }
 LIGHTGBM_NUM_ROUNDS = 1000
 LIGHTGBM_EARLY_STOPPING_ROUNDS = 50
+
+# PyTorch 2.0+ Compatibility Fix
+USE_FLASH_ATTENTION = False  # Disable flash attention to avoid backward pass issues
 
 # Removed ensemble and SPD - focusing on single model + features
 HYPERPARAMETER_TUNING = False
@@ -589,11 +597,21 @@ def train_model():
         torch.cuda.empty_cache()
         print(f"GPU memory before model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
     
-    model = CustomTransformerModel(
-        transformer_name=TRANSFORMER_MODEL_NAME, 
-        num_numerical_features=NUM_NUMERICAL_FEATURES, 
-        num_rules=1
-    ).to(DEVICE)
+    # Apply PyTorch 2.0+ compatibility fix
+    if hasattr(torch.backends, 'cuda') and hasattr(torch.backends.cuda, 'sdp_kernel'):
+        with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+            model = CustomTransformerModel(
+                transformer_name=TRANSFORMER_MODEL_NAME, 
+                num_numerical_features=NUM_NUMERICAL_FEATURES, 
+                num_rules=1
+            ).to(DEVICE)
+    else:
+        # Fallback for older PyTorch versions
+        model = CustomTransformerModel(
+            transformer_name=TRANSFORMER_MODEL_NAME, 
+            num_numerical_features=NUM_NUMERICAL_FEATURES, 
+            num_rules=1
+        ).to(DEVICE)
     
     if DEVICE.type == 'cuda':
         print(f"GPU memory after model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
@@ -674,50 +692,99 @@ def train_model():
 
             optimizer.zero_grad()
             
-            # Forward pass with mixed precision
-            if USE_MIXED_PRECISION:
-                with autocast():
-                    logits = model(input_ids, attention_mask, numerical_features)
-                    # Calculate loss based on loss function type
-                    if USE_ADVANCED_LOSS:
-                        loss = criterion(logits, labels, model=model)
+            # Apply PyTorch 2.0+ compatibility fix for the entire forward/backward pass
+            if hasattr(torch.backends, 'cuda') and hasattr(torch.backends.cuda, 'sdp_kernel'):
+                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                    # Forward pass with mixed precision
+                    if USE_MIXED_PRECISION:
+                        with autocast():
+                            logits = model(input_ids, attention_mask, numerical_features)
+                            # Calculate loss based on loss function type
+                            if USE_ADVANCED_LOSS:
+                                loss = criterion(logits, labels, model=model)
+                            else:
+                                loss = criterion(logits, labels, numerical_features)
+                        
+                        # Backward pass with mixed precision
+                        scaler.scale(loss).backward()
+                        
+                        # Gradient clipping
+                        if USE_GRADIENT_CLIPPING:
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
+                        
+                        # Optimizer step
+                        scaler.step(optimizer)
+                        scaler.update()
                     else:
-                        loss = criterion(logits, labels, numerical_features)
-                
-                # Backward pass with mixed precision
-                scaler.scale(loss).backward()
-                
-                # Gradient clipping
-                if USE_GRADIENT_CLIPPING:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
-                
-                # Optimizer step
-                scaler.step(optimizer)
-                scaler.update()
+                        # Standard forward pass
+                        logits = model(input_ids, attention_mask, numerical_features)
+                        try:
+                            # Calculate loss based on loss function type
+                            if USE_ADVANCED_LOSS:
+                                loss = criterion(logits, labels, model=model)
+                            else:
+                                loss = criterion(logits, labels, numerical_features)
+                        except Exception as e:
+                            print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
+                            print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                            raise e
+                    
+                        # Standard backward pass
+                        loss.backward()
+                        
+                        # Gradient clipping
+                        if USE_GRADIENT_CLIPPING:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
+                        
+                        # Optimizer step
+                        optimizer.step()
             else:
-                # Standard forward pass
-                logits = model(input_ids, attention_mask, numerical_features)
-                try:
-                    # Calculate loss based on loss function type
-                    if USE_ADVANCED_LOSS:
-                        loss = criterion(logits, labels, model=model)
-                    else:
-                        loss = criterion(logits, labels, numerical_features)
-                except Exception as e:
-                    print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
-                    print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
-                    raise e
-            
-                # Standard backward pass
-                loss.backward()
+                # Fallback for older PyTorch versions
+                # Forward pass with mixed precision
+                if USE_MIXED_PRECISION:
+                    with autocast():
+                        logits = model(input_ids, attention_mask, numerical_features)
+                        # Calculate loss based on loss function type
+                        if USE_ADVANCED_LOSS:
+                            loss = criterion(logits, labels, model=model)
+                        else:
+                            loss = criterion(logits, labels, numerical_features)
+                    
+                    # Backward pass with mixed precision
+                    scaler.scale(loss).backward()
+                    
+                    # Gradient clipping
+                    if USE_GRADIENT_CLIPPING:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
+                    
+                    # Optimizer step
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    # Standard forward pass
+                    logits = model(input_ids, attention_mask, numerical_features)
+                    try:
+                        # Calculate loss based on loss function type
+                        if USE_ADVANCED_LOSS:
+                            loss = criterion(logits, labels, model=model)
+                        else:
+                            loss = criterion(logits, labels, numerical_features)
+                    except Exception as e:
+                        print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
+                        print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                        raise e
                 
-                # Gradient clipping
-                if USE_GRADIENT_CLIPPING:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
-                
-                # Optimizer step
-                optimizer.step()
+                    # Standard backward pass
+                    loss.backward()
+                    
+                    # Gradient clipping
+                    if USE_GRADIENT_CLIPPING:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
+                    
+                    # Optimizer step
+                    optimizer.step()
             
             # Learning rate scheduling
             if scheduler is not None:
