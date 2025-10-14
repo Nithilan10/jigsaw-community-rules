@@ -16,12 +16,8 @@ from collections import Counter
 # NOTE: The import below assumes your data_preprocessing file is named 'preprocess.py'
 from preprocess import preprocess_data
 from custom_model import CustomTransformerModel
-from custom_loss import CustomCostSensitiveLoss, CombinedAdvancedLoss
-
-# Fix for PyTorch efficient attention backward pass issue
-torch.backends.cuda.enable_flash_sdp(False)
-torch.backends.cuda.enable_mem_efficient_sdp(False)
-torch.backends.cuda.enable_math_sdp(True)
+from custom_loss import (CustomCostSensitiveLoss, SGDAOptimizer, OGDAOptimizer, RobustLoss,
+                        LabelSmoothingLoss, MixupLoss, AdvancedRegularizationLoss, CombinedAdvancedLoss)
 
 # --- 0. Configuration and Constants ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -516,10 +512,10 @@ def train_model():
         )
     else:
         print("Using Custom Cost Sensitive Loss Function")
-    criterion = CustomCostSensitiveLoss(
-        rule_weights=RULE_WEIGHTS, 
-        feature_weights=FEATURE_WEIGHTS
-    )
+        criterion = CustomCostSensitiveLoss(
+            rule_weights=RULE_WEIGHTS, 
+            feature_weights=FEATURE_WEIGHTS
+        )
 
     # Enhanced optimizer with better parameters
     optimizer = torch.optim.AdamW(
@@ -608,22 +604,21 @@ def train_model():
                     if USE_ADVANCED_LOSS:
                         loss = criterion(logits, labels, model=model)
                     else:
-                        loss = criterion(logits, labels, numerical_features)
-                except Exception as e:
-                    print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
-                    print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
-                    print(f"Logits dtype: {logits.dtype}, Labels dtype: {labels.dtype}")
+                loss = criterion(logits, labels, numerical_features)
+            except Exception as e:
+                print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
+                print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
                 raise e
             
                 # Standard backward pass
             loss.backward()
-                        
+                
                 # Gradient clipping
                 if USE_GRADIENT_CLIPPING:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
                 
                 # Optimizer step
-            optimizer.step()
+                optimizer.step()
             
             # Learning rate scheduling
             if scheduler is not None:
