@@ -63,6 +63,23 @@ MIXUP_ALPHA = 0.2                  # Mixup alpha parameter
 WEIGHT_DECAY = 1e-4                # Weight decay coefficient
 GRADIENT_PENALTY_WEIGHT = 0.1      # Gradient penalty weight
 
+# LightGBM Configuration
+USE_LIGHTGBM = True               # Enable LightGBM training
+LIGHTGBM_PARAMS = {
+    'objective': 'binary',
+    'metric': 'auc',
+    'boosting_type': 'gbdt',
+    'num_leaves': 31,
+    'learning_rate': 0.05,
+    'feature_fraction': 0.9,
+    'bagging_fraction': 0.8,
+    'bagging_freq': 5,
+    'verbose': 0,
+    'random_state': RANDOM_SEED
+}
+LIGHTGBM_NUM_ROUNDS = 1000
+LIGHTGBM_EARLY_STOPPING_ROUNDS = 50
+
 # Removed ensemble and SPD - focusing on single model + features
 HYPERPARAMETER_TUNING = False
 ENSEMBLE_MODE = False
@@ -245,6 +262,82 @@ def apply_smote_oversampling(X_text: list, X_numerical: np.ndarray, y: np.ndarra
     except ImportError:
         print("SMOTE not available. Install imbalanced-learn: pip install imbalanced-learn")
         return X_text, X_numerical, y
+
+# --- LightGBM Training Function ---
+
+def train_lightgbm_model(train_df_processed, validation_df_processed):
+    """
+    Train LightGBM model on numerical features only.
+    
+    Args:
+        train_df_processed: Processed training dataframe
+        validation_df_processed: Processed validation dataframe
+        
+    Returns:
+        Trained LightGBM model and validation AUC
+    """
+    try:
+        import lightgbm as lgb
+        
+        print("\n--- Training LightGBM Model ---")
+        
+        # Prepare features and labels
+        numerical_cols = [col for col in train_df_processed.columns 
+                         if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule'] 
+                         and str(train_df_processed.dtypes[col]) in ['int64', 'float64']]
+        
+        X_train = train_df_processed[numerical_cols].values
+        y_train = train_df_processed['rule_violation'].values
+        X_val = validation_df_processed[numerical_cols].values
+        y_val = validation_df_processed['rule_violation'].values
+        
+        print(f"LightGBM training data: {X_train.shape}")
+        print(f"LightGBM validation data: {X_val.shape}")
+        
+        # Create LightGBM datasets
+        train_data = lgb.Dataset(X_train, label=y_train)
+        val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+        
+        # Train model
+        print("Training LightGBM model...")
+        model = lgb.train(
+            LIGHTGBM_PARAMS,
+            train_data,
+            num_boost_round=LIGHTGBM_NUM_ROUNDS,
+            valid_sets=[val_data],
+            callbacks=[
+                lgb.early_stopping(LIGHTGBM_EARLY_STOPPING_ROUNDS, verbose=True),
+                lgb.log_evaluation(100)
+            ]
+        )
+        
+        # Make predictions and calculate AUC
+        val_preds = model.predict(X_val)
+        val_auc = roc_auc_score(y_val, val_preds)
+        
+        print(f"LightGBM Validation AUC: {val_auc:.4f}")
+        
+        # Save feature importance
+        feature_importance = pd.DataFrame({
+            'feature': numerical_cols,
+            'importance': model.feature_importance()
+        }).sort_values('importance', ascending=False)
+        
+        print("\nTop 20 Most Important Features (LightGBM):")
+        print(feature_importance.head(20))
+        
+        # Save model
+        model.save_model('lightgbm_model.txt')
+        print("LightGBM model saved as 'lightgbm_model.txt'")
+        
+        return model, val_auc
+        
+    except ImportError:
+        print("LightGBM not available. Install with: pip install lightgbm")
+        return None, 0.0
+    except Exception as e:
+        print(f"Error training LightGBM model: {e}")
+        return None, 0.0
 
 # --- 2. Custom Dataset Class ---
 
@@ -454,6 +547,12 @@ def train_model():
         print("FATAL ERROR: DataFrames are empty after preprocessing. Check your 'preprocess.py'.")
         return
 
+    # --- Train LightGBM Model ---
+    lightgbm_model = None
+    lightgbm_auc = 0.0
+    if USE_LIGHTGBM:
+        lightgbm_model, lightgbm_auc = train_lightgbm_model(train_df_processed, validation_df_processed)
+
     # --- Setup DataLoader ---
     print("\nSetting up tokenizer and datasets...")
     try:
@@ -600,18 +699,18 @@ def train_model():
                 # Standard forward pass
                 logits = model(input_ids, attention_mask, numerical_features)
                 try:
-                        # Calculate loss based on loss function type
+                    # Calculate loss based on loss function type
                     if USE_ADVANCED_LOSS:
                         loss = criterion(logits, labels, model=model)
                     else:
-                loss = criterion(logits, labels, numerical_features)
-            except Exception as e:
-                print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
-                print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
-                raise e
+                        loss = criterion(logits, labels, numerical_features)
+                except Exception as e:
+                    print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
+                    print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                    raise e
             
                 # Standard backward pass
-            loss.backward()
+                loss.backward()
                 
                 # Gradient clipping
                 if USE_GRADIENT_CLIPPING:
@@ -662,6 +761,17 @@ def train_model():
                 break
     
     print(f"\nTraining complete. Best validation AUC: {best_auc:.4f}")
+    
+    # Compare model performances
+    if USE_LIGHTGBM and lightgbm_model is not None:
+        print(f"\n--- Model Comparison ---")
+        print(f"Transformer Model Best AUC: {best_auc:.4f}")
+        print(f"LightGBM Model AUC: {lightgbm_auc:.4f}")
+        
+        if lightgbm_auc > best_auc:
+            print("LightGBM outperformed the Transformer model!")
+        else:
+            print("Transformer model outperformed LightGBM!")
 
 # --- Execute Script ---
 if __name__ == '__main__':
