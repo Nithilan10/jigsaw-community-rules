@@ -4,23 +4,24 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
-from sklearn.metrics import roc_auc_score, make_scorer, roc_curve
-from typing import Dict, Any, Tuple, List
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score, roc_curve
+from typing import Tuple
 from torch.cuda.amp import autocast, GradScaler
-import itertools
-import random
 from collections import Counter
 
 # Import custom modules
 # NOTE: The import below assumes your data_preprocessing file is named 'preprocess.py'
 from preprocess import preprocess_data
 from custom_model import CustomTransformerModel
-from custom_loss import (CustomCostSensitiveLoss, SGDAOptimizer, OGDAOptimizer, RobustLoss,
-                        LabelSmoothingLoss, MixupLoss, AdvancedRegularizationLoss, CombinedAdvancedLoss)
+from custom_loss import CustomCostSensitiveLoss, CombinedAdvancedLoss
+
+# Fix for PyTorch efficient attention backward pass issue
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
 
 # --- 0. Configuration and Constants ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -43,8 +44,6 @@ USE_MIXED_PRECISION = False         # Enable mixed precision training
 EARLY_STOPPING_PATIENCE = 3         # Stop if no improvement for 3 epochs
 GRADIENT_CLIP_NORM = 1.0           # Max gradient norm
 WARMUP_RATIO = 0.1                 # 10% of training for warmup
-
-# Removed hyperparameter tuning - focusing on feature engineering instead
 
 # Class Imbalance Handling
 USE_CLASS_WEIGHTING = True         # Enable class weighting
@@ -188,8 +187,6 @@ class EarlyStopping:
                 return True  # Stop training
             return False  # Continue training
 
-# Removed HyperparameterTuner - focusing on single model training
-
 def calculate_class_weights(labels: np.ndarray) -> dict:
     """
     Calculate class weights for handling class imbalance.
@@ -253,7 +250,7 @@ def apply_smote_oversampling(X_text: list, X_numerical: np.ndarray, y: np.ndarra
         print("SMOTE not available. Install imbalanced-learn: pip install imbalanced-learn")
         return X_text, X_numerical, y
 
-# --- 2. Custom Dataset Class (No changes needed here) ---
+# --- 2. Custom Dataset Class ---
 
 class CustomDataset(Dataset):
     """Handles tokenizing text and extracting numerical features and labels."""
@@ -269,10 +266,11 @@ class CustomDataset(Dataset):
         
         # Handle the actual label column 'rule_violation' from the CSV
         if 'rule_violation' in df.columns:
-            self.labels = torch.tensor(df['rule_violation'].values, dtype=torch.long).unsqueeze(1)
+            # Convert labels to float32 for compatibility with loss functions
+            self.labels = torch.tensor(df['rule_violation'].values, dtype=torch.float32).unsqueeze(1)
         else:
             # Fallback to rule_ columns if they exist
-            self.labels = torch.tensor(df.filter(regex='rule_').values, dtype=torch.long)
+            self.labels = torch.tensor(df.filter(regex='rule_').values, dtype=torch.float32)
         
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -302,8 +300,7 @@ class CustomDataset(Dataset):
             'labels': self.labels[idx]
         }
 
-
-# --- 2. Evaluation Function (For AUC Metric) ---
+# --- 3. Evaluation Function (For AUC Metric) ---
 
 def find_optimal_threshold(y_true, y_scores):
     """Find the optimal threshold for the given true labels and predicted scores."""
@@ -312,7 +309,7 @@ def find_optimal_threshold(y_true, y_scores):
     optimal_idx = np.argmax(j_scores)
     return thresholds[optimal_idx]
 
-def evaluate_model(model, dataloader, device=DEVICE, find_optimal_threshold=False) -> Tuple[float, np.ndarray, float]:
+def evaluate_model(model, dataloader, device=DEVICE, find_optimal_threshold_flag=False) -> Tuple[float, np.ndarray, float]:
     """Calculates Column-Averaged AUC and individual AUCs on the validation set."""
     model.eval()
     all_labels = []
@@ -339,7 +336,7 @@ def evaluate_model(model, dataloader, device=DEVICE, find_optimal_threshold=Fals
     probs = np.concatenate(all_probs)
 
     optimal_threshold = 0.5
-    if find_optimal_threshold:
+    if find_optimal_threshold_flag:
         optimal_threshold = find_optimal_threshold(labels, probs)
         print(f"Optimal threshold: {optimal_threshold}")
     
@@ -384,8 +381,7 @@ def predict_with_optimal_threshold(model, dataloader, device=DEVICE, threshold=N
     
     return np.concatenate(all_predictions)
 
-
-# --- 3. Main Training Function ---
+# --- 4. Main Training Function ---
 
 def train_model():
     
@@ -578,12 +574,15 @@ def train_model():
             numerical_features = batch['numerical_features'].to(DEVICE)
             labels = batch['labels'].to(DEVICE)
 
+            # Ensure labels are float32 for loss computation
+            labels = labels.float()
+
             optimizer.zero_grad()
             
             # Forward pass with mixed precision
             if USE_MIXED_PRECISION:
                 with autocast():
-            logits = model(input_ids, attention_mask, numerical_features)
+                    logits = model(input_ids, attention_mask, numerical_features)
                     # Calculate loss based on loss function type
                     if USE_ADVANCED_LOSS:
                         loss = criterion(logits, labels, model=model)
@@ -605,19 +604,20 @@ def train_model():
                 # Standard forward pass
                 logits = model(input_ids, attention_mask, numerical_features)
                 try:
-                    # Calculate loss based on loss function type
+                        # Calculate loss based on loss function type
                     if USE_ADVANCED_LOSS:
                         loss = criterion(logits, labels, model=model)
                     else:
-                loss = criterion(logits, labels, numerical_features)
-            except Exception as e:
-                print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
-                print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                        loss = criterion(logits, labels, numerical_features)
+                except Exception as e:
+                    print(f"ERROR in loss calculation at batch {batch_idx}: {e}")
+                    print(f"Logits shape: {logits.shape}, Labels shape: {labels.shape}, Features shape: {numerical_features.shape}")
+                    print(f"Logits dtype: {logits.dtype}, Labels dtype: {labels.dtype}")
                 raise e
             
                 # Standard backward pass
             loss.backward()
-                
+                        
                 # Gradient clipping
                 if USE_GRADIENT_CLIPPING:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
@@ -642,7 +642,7 @@ def train_model():
         avg_loss = total_loss / len(train_dataloader)
         
         # --- Validation and AUC Check ---
-        validation_auc, auc_per_rule, optimal_threshold = evaluate_model(model, validation_dataloader, DEVICE, find_optimal_threshold=True)
+        validation_auc, auc_per_rule, optimal_threshold = evaluate_model(model, validation_dataloader, DEVICE, find_optimal_threshold_flag=True)
         
         # Store optimal threshold in model for later use
         model.optimal_threshold = optimal_threshold
@@ -668,17 +668,6 @@ def train_model():
     
     print(f"\nTraining complete. Best validation AUC: {best_auc:.4f}")
 
-# Removed all unnecessary functions - keeping only train_model()
-
-# Removed duplicate code - train_model() function handles everything
-
 # --- Execute Script ---
 if __name__ == '__main__':
-    if HYPERPARAMETER_TUNING:
-        train_with_hyperparameter_tuning()
-    elif ENSEMBLE_MODE:
-        train_ensemble()
-    elif SPD_MODE:
-        train_with_spd()
-    else:
     train_model()
