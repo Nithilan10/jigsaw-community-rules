@@ -420,6 +420,10 @@ def train_model():
                      and str(train_df_processed.dtypes[col]) in ['int64', 'float64']]
     num_numerical_features = len(numerical_cols)
     
+    print(f"DEBUG: Found {num_numerical_features} numerical features")
+    print(f"DEBUG: Numerical columns: {numerical_cols[:10]}...")  # Show first 10
+    print(f"DEBUG: All columns: {list(train_df_processed.columns)}")
+    
     # Initialize model with new architecture
     model = CustomTransformerModel(
         transformer_name=TRANSFORMER_MODEL_NAME,  # Not used but kept for compatibility

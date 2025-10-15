@@ -17,7 +17,11 @@ class CustomTransformerModel(nn.Module):
         self.text_attention = nn.Linear(256, 1)
         
         # 3. Combined feature processing
-        combined_feature_size = 128 + num_numerical_features  # 128 from LSTM + numerical features
+        self.text_feature_size = 128  # From LSTM output
+        self.num_numerical_features = num_numerical_features
+        combined_feature_size = self.text_feature_size + num_numerical_features
+        
+        print(f"Model architecture: text_features={self.text_feature_size}, numerical_features={num_numerical_features}, combined={combined_feature_size}")
         
         # 4. Dropout for regularization
         self.dropout = nn.Dropout(0.1)
@@ -75,8 +79,18 @@ class CustomTransformerModel(nn.Module):
         # 5. Apply dropout
         text_features = self.dropout(text_features)
         
+        # Debug: Check shapes
+        if text_features.shape[0] == 1:  # Only print for first batch
+            print(f"Debug - text_features shape: {text_features.shape}")
+            print(f"Debug - numerical_features shape: {numerical_features.shape}")
+            print(f"Debug - Expected combined shape: {self.text_feature_size + self.num_numerical_features}")
+        
         # 6. Combine with numerical features
         combined_features = torch.cat((text_features, numerical_features.float()), dim=1)
+        
+        # Debug: Check final shape
+        if text_features.shape[0] == 1:  # Only print for first batch
+            print(f"Debug - combined_features shape: {combined_features.shape}")
         
         # 7. Final classification
         logits = self.classifier(combined_features)
