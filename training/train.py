@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, get_linear_schedule_with_warmup
+# from transformers import AutoTokenizer, get_linear_schedule_with_warmup  # Not needed anymore
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -22,18 +22,81 @@ from preprocess import preprocess_data
 from custom_model import CustomTransformerModel
 from custom_loss import (CustomCostSensitiveLoss, CombinedAdvancedLoss)
 
+# Simple Tokenizer Class (no internet required)
+class SimpleTokenizer:
+    def __init__(self, vocab_size: int = 50000):
+        self.vocab = {'[PAD]': 0, '[UNK]': 1, '[CLS]': 2, '[SEP]': 3}
+        self.vocab_size = vocab_size
+        self.unk_token_id = 1
+        self.pad_token_id = 0
+        self.cls_token_id = 2
+        self.sep_token_id = 3
+        
+    def build_vocab(self, texts):
+        """Build vocabulary from training texts"""
+        word_counts = Counter()
+        for text in texts:
+            words = str(text).lower().split()
+            word_counts.update(words)
+        
+        # Add most common words to vocab
+        for i, (word, count) in enumerate(word_counts.most_common(self.vocab_size - 4)):
+            self.vocab[word] = i + 4
+        
+        print(f"Built vocabulary with {len(self.vocab)} words")
+    
+    def tokenize(self, text):
+        """Simple word tokenization"""
+        words = str(text).lower().split()
+        return words
+    
+    def convert_tokens_to_ids(self, tokens):
+        ids = []
+        for token in tokens:
+            ids.append(self.vocab.get(token, self.unk_token_id))
+        return ids
+    
+    def __call__(self, text, padding='max_length', truncation=True, max_length=256, return_tensors='pt'):
+        # Tokenize
+        tokens = self.tokenize(text)
+        
+        # Add special tokens
+        tokens = ['[CLS]'] + tokens + ['[SEP]']
+        
+        # Convert to IDs
+        input_ids = self.convert_tokens_to_ids(tokens)
+        
+        # Truncate if needed
+        if len(input_ids) > max_length:
+            input_ids = input_ids[:max_length-1] + [self.sep_token_id]
+        
+        # Create attention mask
+        attention_mask = [1] * len(input_ids)
+        
+        # Pad if needed
+        if len(input_ids) < max_length:
+            padding_length = max_length - len(input_ids)
+            input_ids.extend([self.pad_token_id] * padding_length)
+            attention_mask.extend([0] * padding_length)
+        
+        return {
+            'input_ids': torch.tensor([input_ids]),
+            'attention_mask': torch.tensor([attention_mask])
+        }
+
 # --- 0. Configuration and Constants ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-TRANSFORMER_MODEL_NAME = 'bert-base-uncased'
+TRANSFORMER_MODEL_NAME = 'bert-base-uncased'  # Not used anymore but kept for compatibility
 TRAIN_FILE_PATH = '../data/train.csv'
 TEST_FILE_PATH = '../data/test.csv'
 NUM_RULES = 1
-BATCH_SIZE = 8
-LEARNING_RATE = 1e-6  # REDUCED from 1e-5 to prevent NaN
-NUM_EPOCHS = 6
+BATCH_SIZE = 16  # Increased since no BERT
+LEARNING_RATE = 1e-3  # Higher learning rate for simpler model
+NUM_EPOCHS = 10
 MAX_SEQ_LENGTH = 256
 VALIDATION_SPLIT_RATIO = 0.15
 RANDOM_SEED = 42
+VOCAB_SIZE = 50000
 
 # Enhanced Training Parameters
 USE_LEARNING_RATE_SCHEDULING = True
@@ -143,7 +206,7 @@ def safe_loss_computation(logits, labels, numerical_features, criterion, use_adv
 # --- 2. Custom Dataset Class ---
 
 class CustomDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, tokenizer: AutoTokenizer, max_length: int = 256):
+    def __init__(self, df: pd.DataFrame, tokenizer, max_length: int = 256):
         self.texts = df['comment_text'].values
         
         # Get all numerical features dynamically
@@ -334,7 +397,9 @@ def train_model():
     # --- Setup DataLoader ---
     print("\nSetting up tokenizer and datasets...")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL_NAME)
+        # Build vocabulary from training texts
+        tokenizer = SimpleTokenizer(vocab_size=VOCAB_SIZE)
+        tokenizer.build_vocab(train_df_processed['comment_text'].values)
         print("Tokenizer loaded successfully")
     except Exception as e:
         print(f"ERROR loading tokenizer: {e}")
@@ -349,13 +414,18 @@ def train_model():
     # --- Model and Loss Initialization ---
     print("\n--- 2. Model and Loss Initialization ---")
     
-    # Initialize with simpler configuration first
+    # Count numerical features
+    numerical_cols = [col for col in train_df_processed.columns 
+                     if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule'] 
+                     and str(train_df_processed.dtypes[col]) in ['int64', 'float64']]
+    num_numerical_features = len(numerical_cols)
+    
+    # Initialize model with new architecture
     model = CustomTransformerModel(
-        transformer_name=TRANSFORMER_MODEL_NAME, 
-        num_numerical_features=len([col for col in train_df_processed.columns 
-                                   if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule'] 
-                                   and str(train_df_processed.dtypes[col]) in ['int64', 'float64']]), 
-        num_rules=1
+        transformer_name=TRANSFORMER_MODEL_NAME,  # Not used but kept for compatibility
+        num_numerical_features=num_numerical_features,
+        num_rules=NUM_RULES,
+        vocab_size=VOCAB_SIZE
     ).to(DEVICE)
     
     # Use simpler loss function for stability
@@ -469,6 +539,13 @@ def train_model():
         # Save best model
         if validation_auc > best_auc and not np.isnan(validation_auc):
             torch.save(model.state_dict(), 'best_model.pth')
+            # Also save training components
+            torch.save({
+                'tokenizer_vocab': tokenizer.vocab,
+                'tokenizer_vocab_size': tokenizer.vocab_size,
+                'num_numerical_features': num_numerical_features,
+                'vocab_size': VOCAB_SIZE
+            }, 'training_components.pth')
             print(f"✅ New best model saved! AUC: {validation_auc:.4f}")
             best_auc = validation_auc
     

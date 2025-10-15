@@ -2,67 +2,83 @@
 
 import torch
 import torch.nn as nn
-from transformers import AutoModel
+import torch.nn.functional as F
+from collections import Counter
 
 class CustomTransformerModel(nn.Module):
-    def __init__(self, transformer_name: str, num_numerical_features: int, num_rules: int):
+    def __init__(self, transformer_name: str, num_numerical_features: int, num_rules: int, vocab_size: int = 50000):
         super().__init__()
         
-        # 1. Transformer Backbone (e.g., 'bert-base-uncased')
-        # This generates the semantic representation (embeddings) of the text
-        self.transformer = AutoModel.from_pretrained(transformer_name)
+        # 1. Text Embedding Layer (replaces BERT)
+        self.text_embedding = nn.Embedding(vocab_size, 256, padding_idx=0)
         
-        # Get the size of the Transformer's output embedding (e.g., 768 for BERT-base)
-        hidden_size = self.transformer.config.hidden_size
+        # 2. Text Processing Layers
+        self.text_lstm = nn.LSTM(256, 128, batch_first=True, bidirectional=True)
+        self.text_attention = nn.Linear(256, 1)
         
-        # 2. Merger Layer: The total size of the combined features
-        # Transformer Output (e.g., 768) + Numerical Features (e.g., 8)
-        combined_feature_size = hidden_size + num_numerical_features
+        # 3. Combined feature processing
+        combined_feature_size = 128 + num_numerical_features  # 128 from LSTM + numerical features
         
-        # 3. Dropout for regularization
+        # 4. Dropout for regularization
         self.dropout = nn.Dropout(0.1)
         
-        # 4. Final Classification Head (Simple and Reliable)
-        # This layer takes the combined features and maps them to the number of rules (your predictions)
+        # 5. Final Classification Head
         self.classifier = nn.Sequential(
-            nn.Linear(combined_feature_size, 512),  # Intermediate layer
+            nn.Linear(combined_feature_size, 512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, 256),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(512, num_rules) # Final output layer (one prediction/logit per rule)
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(128, num_rules)
         )
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize model weights"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, mean=0, std=0.1)
 
     def forward(self, input_ids, attention_mask, numerical_features):
         """
         Forward pass through the model.
         
         Args:
-            input_ids: Tokenized text IDs from the Transformer.
-            attention_mask: Mask for padding tokens.
-            numerical_features: Your engineered numerical features (scaled).
+            input_ids: Tokenized text IDs
+            attention_mask: Mask for padding tokens
+            numerical_features: Engineered numerical features
         """
         
-        # Pass text through the Transformer
-        transformer_output = self.transformer(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
+        # 1. Text embedding
+        text_emb = self.text_embedding(input_ids)
         
-        # The output of the Transformer's [CLS] token (used for classification)
-        # Handle different transformer architectures (BERT vs DeBERTa)
-        if hasattr(transformer_output, 'pooler_output') and transformer_output.pooler_output is not None:
-            # BERT and some other models have pooler_output
-            cls_output = transformer_output.pooler_output
-        else:
-            # DeBERTa and other models use last_hidden_state with [CLS] token
-            cls_output = transformer_output.last_hidden_state[:, 0, :]  # [CLS] token (first token)
+        # 2. Apply attention mask
+        text_emb = text_emb * attention_mask.unsqueeze(-1).float()
         
-        cls_output = self.dropout(cls_output)
+        # 3. LSTM processing
+        lstm_out, (hidden, cell) = self.text_lstm(text_emb)
         
-        # Combine Text Embeddings and Numerical Features
-        combined_features = torch.cat((cls_output, numerical_features.float()), dim=1)
+        # 4. Attention mechanism
+        attention_weights = F.softmax(self.text_attention(lstm_out), dim=1)
+        text_features = (lstm_out * attention_weights).sum(dim=1)
         
-        # Pass combined features through the classification head
+        # 5. Apply dropout
+        text_features = self.dropout(text_features)
+        
+        # 6. Combine with numerical features
+        combined_features = torch.cat((text_features, numerical_features.float()), dim=1)
+        
+        # 7. Final classification
         logits = self.classifier(combined_features)
         
-        # Logits are returned (pre-sigmoid) for use with BCEWithLogitsLoss
         return logits
