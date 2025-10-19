@@ -548,7 +548,10 @@ def train_model():
                 'tokenizer_vocab': tokenizer.vocab,
                 'tokenizer_vocab_size': tokenizer.vocab_size,
                 'num_numerical_features': num_numerical_features,
-                'vocab_size': VOCAB_SIZE
+                'vocab_size': VOCAB_SIZE,
+                'tfidf_model': tfidf_model,
+                'mean_vectors': mean_vectors,
+                'scaler': scaler
             }, 'training_components.pth')
             print(f"✅ New best model saved! AUC: {validation_auc:.4f}")
             best_auc = validation_auc
