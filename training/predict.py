@@ -10,6 +10,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -1008,7 +1009,6 @@ def extract_text_augmentation_features(text: str) -> dict:
     # Sentence structure
     sentences = re.split(r'[.!?]+', text)
     sentences = [s.strip() for s in sentences if s.strip()]
-    features['sentence_count'] = len(sentences)
     features['avg_sentence_length'] = np.mean([len(s.split()) for s in sentences]) if sentences else 0
     
     # Complex words (words with 3+ syllables)
@@ -1026,7 +1026,7 @@ def get_empty_text_augmentation_features() -> dict:
     """Return empty text augmentation features"""
     return {
         'synonym_pattern_count': 0, 'translation_pattern_count': 0, 'repeated_words_count': 0,
-        'frequent_words_count': 0, 'sentence_count': 0, 'avg_sentence_length': 0.0,
+        'frequent_words_count': 0, 'avg_sentence_length': 0.0,
         'complex_word_count': 0, 'complex_word_ratio': 0.0
     }
 
@@ -1048,7 +1048,6 @@ def extract_bert_sentence_features(text: str) -> dict:
     
     # Sentence statistics
     sentence_lengths = [len(s.split()) for s in sentences]
-    features['sentence_count'] = len(sentences)
     features['avg_sentence_length'] = np.mean(sentence_lengths)
     features['max_sentence_length'] = np.max(sentence_lengths)
     features['min_sentence_length'] = np.min(sentence_lengths)
@@ -1081,7 +1080,7 @@ def extract_bert_sentence_features(text: str) -> dict:
 def get_empty_bert_sentence_features() -> dict:
     """Return empty BERT sentence features"""
     return {
-        'sentence_count': 0, 'avg_sentence_length': 0.0, 'max_sentence_length': 0, 'min_sentence_length': 0, 'sentence_length_std': 0.0,
+        'avg_sentence_length': 0.0, 'max_sentence_length': 0, 'min_sentence_length': 0, 'sentence_length_std': 0.0,
         'paragraph_count': 0, 'avg_paragraph_length': 0.0, 'max_paragraph_length': 0, 'min_paragraph_length': 0, 'paragraph_length_std': 0.0,
         'bigram_diversity': 0.0
     }
@@ -1387,15 +1386,14 @@ def calculate_simple_features(df: pd.DataFrame, scaler: RobustScaler = None) -> 
     # Basic structural features
     df['comment_length'] = df['comment_text'].str.len()
     df['word_count'] = df['comment_text'].str.split().str.len()
-    df['sentence_count'] = df['comment_text'].str.count(r'[.!?]+')
     df['exclamation_frequency'] = df['comment_text'].apply(_get_exclamation_frequency)
     
     # Legal and promotional interaction features
     df['legal_advice_interaction_feature'] = df['comment_text'].apply(_check_legal_advice_interaction)
     df['promo_persuasion_feature'] = df['comment_text'].apply(_calculate_promo_persuasion_feature)
     
-    # Select continuous features for scaling
-    continuous_features = ['comment_length', 'word_count', 'sentence_count', 'exclamation_frequency']
+    # Select continuous features for scaling (only features present during training)
+    continuous_features = ['comment_length', 'word_count', 'exclamation_frequency']
     
     # Initialize scaler if not provided
     if scaler is None:
@@ -1431,8 +1429,27 @@ def calculate_similarity_features(
     """
     print("Calculating similarity features...")
     
-    # Transform text to TF-IDF vectors
-    X_tfidf = tfidf_model.transform(df['comment_text']).toarray()
+    # Check if TF-IDF model is properly fitted
+    if not hasattr(tfidf_model, 'idf_') or tfidf_model.idf_ is None:
+        print("⚠️  TF-IDF model not properly fitted. Using fallback similarity features.")
+        df['similarity_to_violation'] = 0.0
+        df['similarity_to_safe'] = 0.0
+        df['similarity_difference'] = 0.0
+        df['similarity_ratio'] = 1.0
+        df['boundary_proximity_score'] = 0.0
+        return df
+    
+    try:
+        # Transform text to TF-IDF vectors
+        X_tfidf = tfidf_model.transform(df['comment_text']).toarray()
+    except Exception as e:
+        print(f"⚠️  TF-IDF transform failed: {e}. Using fallback similarity features.")
+        df['similarity_to_violation'] = 0.0
+        df['similarity_to_safe'] = 0.0
+        df['similarity_difference'] = 0.0
+        df['similarity_ratio'] = 1.0
+        df['boundary_proximity_score'] = 0.0
+        return df
     
     # Calculate similarities to mean vectors
     if 'violation' in mean_vectors and 'safe' in mean_vectors:
@@ -1476,6 +1493,13 @@ def calculate_consistency_features(
     
     print("Calculating consistency features...")
     
+    # Check if TF-IDF model is properly fitted
+    if not hasattr(tfidf_model, 'idf_') or tfidf_model.idf_ is None:
+        print("⚠️  TF-IDF model not properly fitted. Using fallback consistency features.")
+        df['example_consistency'] = 0.0
+        df['consistency_deviation'] = 0.0
+        return df
+    
     # Calculate consistency for each row
     consistency_scores = []
     for idx, row in df.iterrows():
@@ -1502,12 +1526,16 @@ def calculate_consistency_features(
     
     # Calculate consistency deviation (how much the current comment deviates from the consistency)
     if 'semantic_difference' in mean_vectors:
-        # Transform current comments to TF-IDF vectors
-        X_tfidf = tfidf_model.transform(df['comment_text']).toarray()
-        semantic_similarities = cosine_similarity(X_tfidf, [mean_vectors['semantic_difference']]).flatten()
-        
-        # Calculate deviation from consistency
-        df['consistency_deviation'] = semantic_similarities - df['example_consistency']
+        try:
+            # Transform current comments to TF-IDF vectors
+            X_tfidf = tfidf_model.transform(df['comment_text']).toarray()
+            semantic_similarities = cosine_similarity(X_tfidf, [mean_vectors['semantic_difference']]).flatten()
+            
+            # Calculate deviation from consistency
+            df['consistency_deviation'] = semantic_similarities - df['example_consistency']
+        except Exception as e:
+            print(f"⚠️  TF-IDF transform failed in consistency deviation: {e}. Using fallback.")
+            df['consistency_deviation'] = 0.0
     else:
         df['consistency_deviation'] = 0.0
     
@@ -1761,9 +1789,9 @@ def preprocess_data(
         'bigram_count', 'trigram_count', 'unique_bigrams', 'unique_trigrams',
         # Text augmentation features (8 features)
         'synonym_pattern_count', 'translation_pattern_count', 'repeated_words_count', 'frequent_words_count',
-        'sentence_count', 'avg_sentence_length', 'complex_word_count', 'complex_word_ratio',
-        # BERT sentence features (11 features)
-        'sentence_count', 'avg_sentence_length', 'max_sentence_length', 'min_sentence_length', 'sentence_length_std',
+        'avg_sentence_length', 'complex_word_count', 'complex_word_ratio',
+        # BERT sentence features (10 features)
+        'avg_sentence_length', 'max_sentence_length', 'min_sentence_length', 'sentence_length_std',
         'paragraph_count', 'avg_paragraph_length', 'max_paragraph_length', 'min_paragraph_length', 'paragraph_length_std',
         'bigram_diversity',
         # Rule-specific comparison features (12 features)
@@ -1935,6 +1963,8 @@ if __name__ == '__main__':
     
     # Try multiple possible paths for the training components
     possible_paths = [
+        '/kaggle/input/training-components-pth/pytorch/default/1/training_components.pth',
+        '/kaggle/input/training-components-pth/pytorch/default/1',
         '/kaggle/input/reddit_model/pytorch/default/1/training_components.pth',
         'training_components.pth',
         './training_components.pth',
@@ -1944,8 +1974,30 @@ if __name__ == '__main__':
     components_loaded = False
     for path in possible_paths:
         try:
-            components = torch.load(path, map_location=torch.device('cpu'))
-            print(f"✅ Training components loaded successfully from {path}!")
+            # Check if it's a directory and list contents
+            if os.path.isdir(path):
+                print(f"📁 Found directory: {path}")
+                try:
+                    files = os.listdir(path)
+                    print(f"   Contents: {files}")
+                    # Try to find .pth files in the directory
+                    pth_files = [f for f in files if f.endswith('.pth')]
+                    if pth_files:
+                        print(f"   Found .pth files: {pth_files}")
+                        # Try the first .pth file
+                        pth_path = os.path.join(path, pth_files[0])
+                        print(f"   Trying: {pth_path}")
+                        components = torch.load(pth_path, map_location=torch.device('cpu'), weights_only=False)
+                        print(f"✅ Training components loaded successfully from {pth_path}!")
+                    else:
+                        print(f"   No .pth files found in directory")
+                        continue
+                except Exception as dir_e:
+                    print(f"   Could not list directory contents: {dir_e}")
+                    continue
+            else:
+                components = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
+                print(f"✅ Training components loaded successfully from {path}!")
             
             # Extract components
             tfidf_model = components.get('tfidf_model')
@@ -1954,12 +2006,12 @@ if __name__ == '__main__':
             
             # Process test data with pre-trained components
             test_df_processed, _, _, _ = preprocess_data(
-        df_to_process=test_df,
+                df_to_process=test_df,
                 tfidf_model=tfidf_model,
                 mean_vectors=mean_vectors,
                 scaler=scaler,
-        enable_spacy=False
-    )
+                enable_spacy=False
+            )
             components_loaded = True
             break
             
@@ -2028,7 +2080,7 @@ if __name__ == '__main__':
                 if 'rule_violation' in train_df.columns:
                     print(f"   Rule violations: {train_df['rule_violation'].sum()}")
                 break
-        except Exception as e:
+            except Exception as e:
                 print(f"❌ Could not load training data from {path}: {e}")
                 continue
         

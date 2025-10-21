@@ -259,14 +259,18 @@ def create_training_components():
     print("🔄 Creating tokenizer...")
     tokenizer = SimpleTokenizer(vocab_size=50000)
     
-    # Create TF-IDF model
+    # Create TF-IDF model (using EXACT same parameters as training script)
     print("🔄 Creating TF-IDF model...")
     tfidf_model = TfidfVectorizer(
-        max_features=10000,
-        stop_words='english',
-        ngram_range=(1, 2),
-        min_df=2,
-        max_df=0.95
+        max_features=5000,           # Match training script
+        stop_words='english',        # Match training script
+        ngram_range=(1, 2),          # Match training script
+        min_df=1,                    # Match training script
+        max_df=1.0,                  # Match training script
+        sublinear_tf=False,          # Match training script
+        norm='l2',                   # Match training script
+        smooth_idf=True,             # Match training script
+        lowercase=True               # Match training script
     )
     
     # Fit TF-IDF on training data
