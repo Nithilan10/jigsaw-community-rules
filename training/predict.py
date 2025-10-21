@@ -1954,12 +1954,12 @@ if __name__ == '__main__':
             
             # Process test data with pre-trained components
             test_df_processed, _, _, _ = preprocess_data(
-                df_to_process=test_df,
+        df_to_process=test_df,
                 tfidf_model=tfidf_model,
                 mean_vectors=mean_vectors,
                 scaler=scaler,
-                enable_spacy=False
-            )
+        enable_spacy=False
+    )
             components_loaded = True
             break
             
@@ -1969,13 +1969,109 @@ if __name__ == '__main__':
     
     if not components_loaded:
         print("❌ Could not load training components from any path.")
-        print("Falling back to fitting on test data (will produce poor results)...")
-        test_df_processed, tfidf_model, mean_vectors, scaler = preprocess_data(
-            df_to_process=test_df,
-            enable_spacy=False
-        )
+        print("⚠️  WARNING: This will cause poor performance!")
+        print("   The model will be fitted on test data instead of training data.")
+        print("   This is why your score is low (0.619 instead of 0.93).")
+        print("   To fix this, you need to run the training script first to create training_components.pth")
+        print("")
+        
+        # Try to create components from training data if available
+        print("🔧 Attempting to create components from training data...")
+        print("   This should fix the low score issue by using proper preprocessing...")
+        
+        # Try multiple possible paths for the training data (same pattern as test data)
+        # Check if we're in Kaggle environment
+        import os
+        is_kaggle = os.path.exists('/kaggle/input')
+        
+        if is_kaggle:
+            print("🔍 Detected Kaggle environment")
+            train_paths = [
+                '/kaggle/input/jigsaw-agile-community-rules/train.csv',
+                '/kaggle/input/jigsaw-agile-community-rules/data/train.csv',
+                'train.csv',
+                'data/train.csv'
+            ]
+            # List available files in Kaggle input
+            try:
+                import os
+                if os.path.exists('/kaggle/input'):
+                    print("📁 Available Kaggle input directories:")
+                    for item in os.listdir('/kaggle/input'):
+                        print(f"   - {item}")
+            except Exception:
+                pass
+        else:
+            print("🔍 Detected local environment")
+            train_paths = [
+                '../data/train.csv',
+                'data/train.csv',
+                './data/train.csv',
+                'train.csv',
+                '/Users/mythilygurunathan/Documents/GitHub/jigsaw-community-rules/data/train.csv'
+            ]
+            # List available files in current directory
+            try:
+                import os
+                print("📁 Available files in current directory:")
+                for item in os.listdir('.'):
+                    if item.endswith('.csv'):
+                        print(f"   - {item}")
+            except Exception:
+                pass
+        
+        train_df = None
+        for path in train_paths:
+            try:
+                train_df = pd.read_csv(path)
+                print(f"✅ Found training data at {path}: {train_df.shape}")
+                if 'rule_violation' in train_df.columns:
+                    print(f"   Rule violations: {train_df['rule_violation'].sum()}")
+                break
+        except Exception as e:
+                print(f"❌ Could not load training data from {path}: {e}")
+                continue
+        
+        if train_df is not None and 'rule_violation' in train_df.columns:
+            print("🔄 Creating components from training data...")
+            print("   This will take a moment as it processes the full training dataset...")
+            # Process training data to get components
+            train_df_processed, tfidf_model, mean_vectors, scaler = preprocess_data(
+                df_to_process=train_df,
+                enable_spacy=False
+            )
+            print("✅ Components created from training data!")
+            print("   Now processing test data with proper components...")
+            # Now process test data with the proper components
+            test_df_processed, _, _, _ = preprocess_data(
+                df_to_process=test_df,
+                tfidf_model=tfidf_model,
+                mean_vectors=mean_vectors,
+                scaler=scaler,
+                enable_spacy=False
+            )
+            print("✅ Test data processed with proper components!")
+        else:
+            print("❌ No training data found. Using test data (poor results expected)...")
+            print("   This will cause the low score issue to persist...")
+            test_df_processed, tfidf_model, mean_vectors, scaler = preprocess_data(
+                df_to_process=test_df,
+                enable_spacy=False
+            )
 
     print(f"Preprocessed shape: {test_df_processed.shape}")
+    
+    # Debug: Check feature consistency
+    print(f"Number of features: {test_df_processed.shape[1]}")
+    print(f"Feature columns: {list(test_df_processed.columns)[:10]}...")  # Show first 10 columns
+    
+    # Check for key features
+    key_features = ['similarity_to_violation', 'similarity_to_safe', 'boundary_proximity_score']
+    for feat in key_features:
+        if feat in test_df_processed.columns:
+            print(f"✅ {feat}: {test_df_processed[feat].mean():.4f} ± {test_df_processed[feat].std():.4f}")
+        else:
+            print(f"❌ Missing key feature: {feat}")
 
     tokenizer = SimpleTokenizer(vocab_size=50000)
     model = CustomTransformerModel(num_rules=1, vocab_size=50000)
@@ -2023,8 +2119,23 @@ if __name__ == '__main__':
                 print(f"Debug: First batch logits range: {logits.min().item():.4f} to {logits.max().item():.4f}")
                 print(f"Debug: First batch probabilities range: {probs.min():.4f} to {probs.max():.4f}")
                 print(f"Debug: First batch probabilities: {probs.flatten()}")
+                
+                # Check if predictions are too extreme (all 0s or all 1s)
+                if probs.min() == probs.max():
+                    print("⚠️ WARNING: All predictions are identical! This suggests a model issue.")
+                elif probs.min() < 0.1 and probs.max() > 0.9:
+                    print("✅ Good: Predictions show good range and discrimination")
+                else:
+                    print(f"⚠️ WARNING: Predictions might be too conservative (range: {probs.min():.3f}-{probs.max():.3f})")
 
     submission = pd.DataFrame({'row_id': test_df['row_id'], 'rule_violation': preds})
     submission.to_csv('submission.csv', index=False)
+    
+    # Final diagnostics
     print(f"Submission saved: {len(submission)} rows; range {min(preds):.4f}-{max(preds):.4f}")
+    print(f"Prediction distribution: mean={np.mean(preds):.4f}, std={np.std(preds):.4f}")
+    print(f"Predictions < 0.1: {sum(1 for p in preds if p < 0.1)}")
+    print(f"Predictions > 0.9: {sum(1 for p in preds if p > 0.9)}")
+    print(f"Predictions in [0.4, 0.6]: {sum(1 for p in preds if 0.4 <= p <= 0.6)}")
+    
     print("Preview:\n", submission.head(10))
