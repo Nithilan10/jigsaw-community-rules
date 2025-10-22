@@ -13,6 +13,7 @@ from torch.cuda.amp import autocast, GradScaler
 from collections import Counter
 import os
 import warnings
+import re
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -21,6 +22,328 @@ warnings.filterwarnings('ignore')
 from preprocess import preprocess_data
 from custom_model import CustomTransformerModel
 from custom_loss import (CustomCostSensitiveLoss, CombinedAdvancedLoss)
+
+# ============================================================================
+# COMPARATIVE FEATURE ENGINEERING FOR TRAINING
+# ============================================================================
+
+def calculate_comparative_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate powerful comparative features between positive and negative examples."""
+    print("🚀 Calculating comparative features for training...")
+    
+    # Group by subreddit and rule to compare examples
+    comparative_features = []
+    
+    for (subreddit, rule), group in df.groupby(['subreddit', 'rule']):
+        print(f"📊 Processing {subreddit} - {rule}: {len(group)} examples")
+        
+        # Get positive and negative examples for this rule
+        positive_examples = []
+        negative_examples = []
+        
+        for _, row in group.iterrows():
+            # Collect positive examples (violations)
+            for col in ['positive_example_1', 'positive_example_2']:
+                if col in row and pd.notna(row[col]) and str(row[col]).strip():
+                    positive_examples.append(str(row[col]).strip())
+            
+            # Collect negative examples (non-violations)
+            for col in ['negative_example_1', 'negative_example_2']:
+                if col in row and pd.notna(row[col]) and str(row[col]).strip():
+                    negative_examples.append(str(row[col]).strip())
+        
+        if not positive_examples or not negative_examples:
+            print(f"⚠️  Skipping {subreddit} - {rule}: insufficient examples")
+            continue
+        
+        # Calculate comparative features for each comment in this group
+        for _, row in group.iterrows():
+            comment_text = str(row['comment_text']).strip()
+            if not comment_text:
+                continue
+            
+            features = {}
+            
+            # 1. Similarity to Positive Examples (Violations)
+            pos_similarities = []
+            for pos_ex in positive_examples:
+                if pos_ex != comment_text:  # Don't compare to self
+                    similarity = calculate_text_similarity(comment_text, pos_ex)
+                    pos_similarities.append(similarity)
+            
+            features['similarity_to_violations'] = np.mean(pos_similarities) if pos_similarities else 0.0
+            features['max_similarity_to_violations'] = np.max(pos_similarities) if pos_similarities else 0.0
+            features['min_similarity_to_violations'] = np.min(pos_similarities) if pos_similarities else 0.0
+            
+            # 2. Similarity to Negative Examples (Non-violations)
+            neg_similarities = []
+            for neg_ex in negative_examples:
+                if neg_ex != comment_text:  # Don't compare to self
+                    similarity = calculate_text_similarity(comment_text, neg_ex)
+                    neg_similarities.append(similarity)
+            
+            features['similarity_to_non_violations'] = np.mean(neg_similarities) if neg_similarities else 0.0
+            features['max_similarity_to_non_violations'] = np.max(neg_similarities) if neg_similarities else 0.0
+            features['min_similarity_to_non_violations'] = np.min(neg_similarities) if neg_similarities else 0.0
+            
+            # 3. Violation vs Non-violation Similarity Difference
+            features['violation_similarity_diff'] = features['similarity_to_violations'] - features['similarity_to_non_violations']
+            features['violation_similarity_ratio'] = (
+                features['similarity_to_violations'] / (features['similarity_to_non_violations'] + 1e-8)
+            )
+            
+            # 4. Text Length Comparison
+            pos_lengths = [len(ex.split()) for ex in positive_examples]
+            neg_lengths = [len(ex.split()) for ex in negative_examples]
+            
+            comment_length = len(comment_text.split())
+            features['length_vs_violations'] = comment_length - np.mean(pos_lengths) if pos_lengths else 0
+            features['length_vs_non_violations'] = comment_length - np.mean(neg_lengths) if neg_lengths else 0
+            features['length_violation_diff'] = features['length_vs_violations'] - features['length_vs_non_violations']
+            
+            # 5. Complexity Comparison
+            comment_complexity = calculate_text_complexity(comment_text)
+            pos_complexities = [calculate_text_complexity(ex) for ex in positive_examples]
+            neg_complexities = [calculate_text_complexity(ex) for ex in negative_examples]
+            
+            features['complexity_vs_violations'] = comment_complexity - np.mean(pos_complexities) if pos_complexities else 0
+            features['complexity_vs_non_violations'] = comment_complexity - np.mean(neg_complexities) if neg_complexities else 0
+            features['complexity_violation_diff'] = features['complexity_vs_violations'] - features['complexity_vs_non_violations']
+            
+            # 6. Legal Language Comparison
+            comment_legal = count_legal_patterns(comment_text)
+            pos_legal = [count_legal_patterns(ex) for ex in positive_examples]
+            neg_legal = [count_legal_patterns(ex) for ex in negative_examples]
+            
+            features['legal_vs_violations'] = comment_legal - np.mean(pos_legal) if pos_legal else 0
+            features['legal_vs_non_violations'] = comment_legal - np.mean(neg_legal) if neg_legal else 0
+            features['legal_violation_diff'] = features['legal_vs_violations'] - features['legal_vs_non_violations']
+            
+            # 7. Promotional Language Comparison
+            comment_promo = count_promotional_patterns(comment_text)
+            pos_promo = [count_promotional_patterns(ex) for ex in positive_examples]
+            neg_promo = [count_promotional_patterns(ex) for ex in negative_examples]
+            
+            features['promo_vs_violations'] = comment_promo - np.mean(pos_promo) if pos_promo else 0
+            features['promo_vs_non_violations'] = comment_promo - np.mean(neg_promo) if neg_promo else 0
+            features['promo_violation_diff'] = features['promo_vs_violations'] - features['promo_vs_non_violations']
+            
+            # 8. Emotional Intensity Comparison
+            comment_emotion = count_emotional_words(comment_text)
+            pos_emotion = [count_emotional_words(ex) for ex in positive_examples]
+            neg_emotion = [count_emotional_words(ex) for ex in negative_examples]
+            
+            features['emotion_vs_violations'] = comment_emotion - np.mean(pos_emotion) if pos_emotion else 0
+            features['emotion_vs_non_violations'] = comment_emotion - np.mean(neg_emotion) if neg_emotion else 0
+            features['emotion_violation_diff'] = features['emotion_vs_violations'] - features['emotion_vs_non_violations']
+            
+            # 9. Question Pattern Comparison
+            comment_questions = count_question_patterns(comment_text)
+            pos_questions = [count_question_patterns(ex) for ex in positive_examples]
+            neg_questions = [count_question_patterns(ex) for ex in negative_examples]
+            
+            features['questions_vs_violations'] = comment_questions - np.mean(pos_questions) if pos_questions else 0
+            features['questions_vs_non_violations'] = comment_questions - np.mean(neg_questions) if neg_questions else 0
+            features['questions_violation_diff'] = features['questions_vs_violations'] - features['questions_vs_non_violations']
+            
+            # 10. Advanced Similarity Features
+            features['similarity_rank_violations'] = np.mean([1 if s > features['similarity_to_non_violations'] else 0 for s in pos_similarities]) if pos_similarities else 0
+            features['similarity_rank_non_violations'] = np.mean([1 if s > features['similarity_to_violations'] else 0 for s in neg_similarities]) if neg_similarities else 0
+            
+            # 11. Rule-Specific Pattern Matching
+            rule_keywords = extract_rule_keywords(rule)
+            features['rule_keyword_match'] = count_rule_keywords(comment_text, rule_keywords)
+            features['rule_keyword_vs_violations'] = features['rule_keyword_match'] - np.mean([count_rule_keywords(ex, rule_keywords) for ex in positive_examples]) if positive_examples else 0
+            features['rule_keyword_vs_non_violations'] = features['rule_keyword_match'] - np.mean([count_rule_keywords(ex, rule_keywords) for ex in negative_examples]) if negative_examples else 0
+            
+            # 12. Subreddit-Specific Features
+            subreddit_context = get_subreddit_context(subreddit)
+            features['subreddit_context_match'] = count_subreddit_context(comment_text, subreddit_context)
+            
+            # 13. Advanced Text Patterns
+            features['has_imperative'] = count_imperative_patterns(comment_text)
+            features['has_conditional'] = count_conditional_patterns(comment_text)
+            features['has_negation'] = count_negation_patterns(comment_text)
+            
+            # 14. Composite Violation Score (Enhanced)
+            violation_indicators = [
+                'violation_similarity_diff', 'length_violation_diff', 'complexity_violation_diff',
+                'legal_violation_diff', 'promo_violation_diff', 'emotion_violation_diff',
+                'rule_keyword_vs_violations', 'similarity_rank_violations'
+            ]
+            available_indicators = [col for col in violation_indicators if col in features]
+            features['composite_violation_score'] = np.mean([features[col] for col in available_indicators]) if available_indicators else 0
+            
+            # 15. Violation Confidence Score
+            features['violation_confidence'] = np.std([features[col] for col in available_indicators]) if available_indicators else 0
+            
+            comparative_features.append(features)
+    
+    # Convert to DataFrame and merge
+    if comparative_features:
+        comp_df = pd.DataFrame(comparative_features)
+        df = pd.concat([df, comp_df], axis=1)
+        print(f"✅ Added {len(comp_df.columns)} comparative features")
+    else:
+        print("⚠️  No comparative features generated")
+    
+    return df
+
+def calculate_text_similarity(text1: str, text2: str) -> float:
+    """Calculate text similarity using simple word overlap."""
+    words1 = set(text1.lower().split())
+    words2 = set(text2.lower().split())
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    intersection = len(words1.intersection(words2))
+    union = len(words1.union(words2))
+    
+    return intersection / union if union > 0 else 0.0
+
+def calculate_text_complexity(text: str) -> float:
+    """Calculate text complexity score."""
+    words = text.split()
+    if not words:
+        return 0.0
+    
+    # Average word length
+    avg_word_length = np.mean([len(word) for word in words])
+    
+    # Sentence count
+    sentences = text.count('.') + text.count('!') + text.count('?')
+    sentences = max(1, sentences)
+    
+    # Words per sentence
+    words_per_sentence = len(words) / sentences
+    
+    # Complexity score
+    complexity = (avg_word_length * 0.4 + words_per_sentence * 0.6)
+    return complexity
+
+def count_legal_patterns(text: str) -> int:
+    """Count legal advice patterns."""
+    legal_patterns = [
+        r'\b(should|must|need to|recommend|suggest|advise|counsel)\b',
+        r'\b(lawyer|attorney|legal|court|lawsuit|litigation)\b',
+        r'\b(consult|hire|get|seek)\s+(a\s+)?(lawyer|attorney|legal)\b'
+    ]
+    
+    count = 0
+    for pattern in legal_patterns:
+        count += len(re.findall(pattern, text, re.IGNORECASE))
+    return count
+
+def count_promotional_patterns(text: str) -> int:
+    """Count promotional patterns."""
+    promo_patterns = [
+        r'\b(free|limited|giveaway|discount|click here|watch now)\b',
+        r'\b(limited time|act now|don\'t miss|exclusive)\b',
+        r'\b(call now|order now|buy now|get it now)\b'
+    ]
+    
+    count = 0
+    for pattern in promo_patterns:
+        count += len(re.findall(pattern, text, re.IGNORECASE))
+    return count
+
+def count_emotional_words(text: str) -> int:
+    """Count emotional words."""
+    emotional_words = [
+        'amazing', 'incredible', 'fantastic', 'terrible', 'awful', 'horrible',
+        'love', 'hate', 'angry', 'furious', 'excited', 'disappointed'
+    ]
+    
+    count = 0
+    for word in emotional_words:
+        count += text.lower().count(word)
+    return count
+
+def count_question_patterns(text: str) -> int:
+    """Count question patterns."""
+    return text.count('?') + len(re.findall(r'\b(why|how|what|when|where|who)\b', text, re.IGNORECASE))
+
+def extract_rule_keywords(rule: str) -> list:
+    """Extract keywords from rule text."""
+    # Common rule keywords
+    rule_keywords = []
+    rule_lower = rule.lower()
+    
+    if 'advertising' in rule_lower or 'spam' in rule_lower:
+        rule_keywords.extend(['advertising', 'spam', 'promotional', 'marketing', 'sell', 'buy', 'discount', 'free'])
+    if 'legal' in rule_lower or 'advice' in rule_lower:
+        rule_keywords.extend(['legal', 'advice', 'lawyer', 'attorney', 'court', 'lawsuit'])
+    if 'harassment' in rule_lower or 'abuse' in rule_lower:
+        rule_keywords.extend(['harassment', 'abuse', 'threat', 'insult', 'offensive'])
+    if 'personal' in rule_lower or 'private' in rule_lower:
+        rule_keywords.extend(['personal', 'private', 'information', 'contact', 'phone', 'email'])
+    
+    return rule_keywords
+
+def count_rule_keywords(text: str, keywords: list) -> int:
+    """Count rule-specific keywords in text."""
+    count = 0
+    text_lower = text.lower()
+    for keyword in keywords:
+        count += text_lower.count(keyword)
+    return count
+
+def get_subreddit_context(subreddit: str) -> list:
+    """Get context-specific keywords for subreddit."""
+    subreddit_contexts = {
+        'legaladvice': ['legal', 'law', 'court', 'attorney', 'lawsuit', 'rights'],
+        'personalfinance': ['money', 'investment', 'budget', 'debt', 'credit', 'loan'],
+        'relationships': ['relationship', 'partner', 'marriage', 'dating', 'family'],
+        'technology': ['tech', 'software', 'computer', 'programming', 'code'],
+        'fitness': ['exercise', 'workout', 'gym', 'fitness', 'health', 'diet']
+    }
+    return subreddit_contexts.get(subreddit.lower(), [])
+
+def count_subreddit_context(text: str, context_keywords: list) -> int:
+    """Count subreddit-specific context keywords."""
+    count = 0
+    text_lower = text.lower()
+    for keyword in context_keywords:
+        count += text_lower.count(keyword)
+    return count
+
+def count_imperative_patterns(text: str) -> int:
+    """Count imperative patterns (commands, instructions)."""
+    imperative_patterns = [
+        r'\b(you should|you must|you need to|you have to|you ought to)\b',
+        r'\b(do this|try this|use this|get this|buy this)\b',
+        r'\b(don\'t|never|always|make sure|be sure)\b'
+    ]
+    
+    count = 0
+    for pattern in imperative_patterns:
+        count += len(re.findall(pattern, text, re.IGNORECASE))
+    return count
+
+def count_conditional_patterns(text: str) -> int:
+    """Count conditional patterns."""
+    conditional_patterns = [
+        r'\b(if|when|unless|provided that|in case)\b',
+        r'\b(would|could|should|might|may)\b'
+    ]
+    
+    count = 0
+    for pattern in conditional_patterns:
+        count += len(re.findall(pattern, text, re.IGNORECASE))
+    return count
+
+def count_negation_patterns(text: str) -> int:
+    """Count negation patterns."""
+    negation_patterns = [
+        r'\b(no|not|never|none|nothing|nowhere|nobody)\b',
+        r'\b(doesn\'t|don\'t|won\'t|can\'t|shouldn\'t|wouldn\'t)\b'
+    ]
+    
+    count = 0
+    for pattern in negation_patterns:
+        count += len(re.findall(pattern, text, re.IGNORECASE))
+    return count
 
 # Simple Tokenizer Class (no internet required)
 class SimpleTokenizer:
@@ -337,6 +660,10 @@ def train_model():
         enable_spacy=ENABLE_SPACY_FEATURES
     )
     
+    # Add powerful comparative features for training
+    print("\n🚀 Adding comparative features for training...")
+    train_df_processed = calculate_comparative_features(train_df_processed)
+    
     print("Processing VALIDATION data...")
     validation_df_processed, _, _, _ = preprocess_data(
         file_path=None, 
@@ -346,6 +673,10 @@ def train_model():
         scaler=scaler,
         enable_spacy=ENABLE_SPACY_FEATURES
     )
+    
+    # Add comparative features for validation (using training examples as reference)
+    print("\n🚀 Adding comparative features for validation...")
+    validation_df_processed = calculate_comparative_features(validation_df_processed)
     
     # Validate processed data
     print(f"Processed train shape: {train_df_processed.shape}")
