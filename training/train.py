@@ -31,6 +31,18 @@ def calculate_comparative_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate powerful comparative features between positive and negative examples."""
     print("🚀 Calculating comparative features for training...")
     
+    # Check available columns
+    print(f"Available columns: {list(df.columns)}")
+    
+    # Check if we have the required columns
+    required_cols = ['subreddit', 'rule', 'positive_example_1', 'positive_example_2', 'negative_example_1', 'negative_example_2']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    
+    if missing_cols:
+        print(f"⚠️  Missing required columns: {missing_cols}")
+        print("🔄 Skipping comparative features...")
+        return df
+    
     # Group by subreddit and rule to compare examples
     comparative_features = []
     
@@ -652,31 +664,31 @@ def train_model():
 
     print(f"Dataset split: Train={len(train_df_raw)} samples, Validation={len(validation_df_raw)} samples")
 
+    # --- Add Comparative Features BEFORE Preprocessing ---
+    print("\n🚀 Adding comparative features for training...")
+    train_df_with_comparative = calculate_comparative_features(train_df_raw)
+    
     # --- Preprocessing ---
     print("\nProcessing TRAINING data...")
     train_df_processed, tfidf_model, mean_vectors, scaler = preprocess_data(
         file_path=None, 
-        df_to_process=train_df_raw,
+        df_to_process=train_df_with_comparative,
         enable_spacy=ENABLE_SPACY_FEATURES
     )
     
-    # Add powerful comparative features for training
-    print("\n🚀 Adding comparative features for training...")
-    train_df_processed = calculate_comparative_features(train_df_processed)
+    # Add comparative features for validation BEFORE preprocessing
+    print("\n🚀 Adding comparative features for validation...")
+    validation_df_with_comparative = calculate_comparative_features(validation_df_raw)
     
     print("Processing VALIDATION data...")
     validation_df_processed, _, _, _ = preprocess_data(
         file_path=None, 
-        df_to_process=validation_df_raw,
+        df_to_process=validation_df_with_comparative,
         tfidf_model=tfidf_model,
         mean_vectors=mean_vectors,
         scaler=scaler,
         enable_spacy=ENABLE_SPACY_FEATURES
     )
-    
-    # Add comparative features for validation (using training examples as reference)
-    print("\n🚀 Adding comparative features for validation...")
-    validation_df_processed = calculate_comparative_features(validation_df_processed)
     
     # Validate processed data
     print(f"Processed train shape: {train_df_processed.shape}")
