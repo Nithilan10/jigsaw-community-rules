@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 
 # Import custom modules
 from preprocess import preprocess_data
-from custom_model import CustomTransformerModel
+from custom_model import CustomTransformerModel, LightGBMModel, XGBoostModel, EnsembleModel
 from custom_loss import (CustomCostSensitiveLoss, CombinedAdvancedLoss)
 
 # ============================================================================
@@ -440,9 +440,12 @@ TRANSFORMER_MODEL_NAME = 'bert-base-uncased'  # Not used anymore but kept for co
 TRAIN_FILE_PATH = '../data/train.csv'
 TEST_FILE_PATH = '../data/test.csv'
 NUM_RULES = 1
-BATCH_SIZE = 16  # Increased since no BERT
-LEARNING_RATE = 1e-3  # Higher learning rate for simpler model
-NUM_EPOCHS = 10
+# Model Configuration
+USE_LIGHTGBM = True  # Use LightGBM for best tabular performance
+USE_ENSEMBLE = True  # Use ensemble of LightGBM + XGBoost
+BATCH_SIZE = 16  # For PyTorch fallback
+LEARNING_RATE = 1e-3  # For PyTorch fallback
+NUM_EPOCHS = 10  # For PyTorch fallback
 MAX_SEQ_LENGTH = 256
 VALIDATION_SPLIT_RATIO = 0.15
 RANDOM_SEED = 42
@@ -678,6 +681,8 @@ def train_model():
     )
 
     print(f"Dataset split: Train={len(train_df_raw)} samples, Validation={len(validation_df_raw)} samples")
+    print(f"📊 Training data shape: {train_df_raw.shape}")
+    print(f"📊 Validation data shape: {validation_df_raw.shape}")
 
     # --- Add Comparative Features BEFORE Preprocessing ---
     print("\n🚀 Adding comparative features for training...")
@@ -752,169 +757,74 @@ def train_model():
             print(f"LightGBM training failed: {e}")
             lightgbm_auc = 0.0
 
-    # --- Setup DataLoader ---
-    print("\nSetting up tokenizer and datasets...")
-    try:
-        # Build vocabulary from training texts
-        tokenizer = SimpleTokenizer(vocab_size=VOCAB_SIZE)
-        tokenizer.build_vocab(train_df_processed['comment_text'].values)
-        print("Tokenizer loaded successfully")
-    except Exception as e:
-        print(f"ERROR loading tokenizer: {e}")
-        return
+    # --- Prepare Data for LightGBM/XGBoost ---
+    print("\n--- 2. Preparing Data for LightGBM/XGBoost ---")
     
-    train_dataset = CustomDataset(train_df_processed, tokenizer, MAX_SEQ_LENGTH)
-    validation_dataset = CustomDataset(validation_df_processed, tokenizer, MAX_SEQ_LENGTH)
+    # Extract features and labels
+    feature_cols = [col for col in train_df_processed.columns 
+                   if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule', 'body', 'text', 'comment', 'content', 'message']]
     
-    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-    validation_dataloader = DataLoader(validation_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    X_train = train_df_processed[feature_cols].values
+    y_train = train_df_processed['rule_violation'].values
+    X_val = validation_df_processed[feature_cols].values
+    y_val = validation_df_processed['rule_violation'].values
+    
+    print(f"📊 Training features shape: {X_train.shape}")
+    print(f"📊 Validation features shape: {X_val.shape}")
+    print(f"📊 Feature columns: {len(feature_cols)}")
+    print(f"📊 Sample features: {feature_cols[:10]}")
+    
+    # Handle any NaN values
+    X_train = np.nan_to_num(X_train, nan=0.0)
+    X_val = np.nan_to_num(X_val, nan=0.0)
 
-    # --- Model and Loss Initialization ---
-    print("\n--- 2. Model and Loss Initialization ---")
+    # --- Train LightGBM Model ---
+    print("\n--- 3. Training LightGBM Model ---")
     
-    # Count numerical features
-    numerical_cols = [col for col in train_df_processed.columns 
-                     if col not in ['comment_text', 'rule_violation', 'subreddit', 'rule'] 
-                     and str(train_df_processed.dtypes[col]) in ['int64', 'float64']]
-    num_numerical_features = len(numerical_cols)
+    # Train LightGBM model
+    print("🚀 Training LightGBM model...")
+    if USE_ENSEMBLE:
+        model = EnsembleModel(num_rules=NUM_RULES)
+    else:
+        model = LightGBMModel(num_rules=NUM_RULES)
     
-    print(f"DEBUG: Found {num_numerical_features} numerical features")
-    print(f"DEBUG: Numerical columns: {numerical_cols[:10]}...")  # Show first 10
-    print(f"DEBUG: All columns: {list(train_df_processed.columns)}")
+    # Train the model
+    model.fit(X_train, y_train, X_val, y_val)
     
-    # Initialize model with new architecture
-    model = CustomTransformerModel(
-        transformer_name=TRANSFORMER_MODEL_NAME,  # Not used but kept for compatibility
-        num_numerical_features=num_numerical_features,
-        num_rules=NUM_RULES,
-        vocab_size=VOCAB_SIZE
-    ).to(DEVICE)
+    # Get predictions and evaluate
+    train_pred = model.predict_proba(X_train)
+    val_pred = model.predict_proba(X_val)
     
-    # Use simpler loss function for stability
-    criterion = CustomCostSensitiveLoss(
-        rule_weights={0: 1.0},  # Simpler weights
-        feature_weights={}       # No feature weights for now
-    )
+    train_auc = roc_auc_score(y_train, train_pred)
+    val_auc = roc_auc_score(y_val, val_pred)
+    
+    print(f"📊 Training AUC: {train_auc:.4f}")
+    print(f"📊 Validation AUC: {val_auc:.4f}")
+    
+    # Get feature importance
+    if hasattr(model, 'get_feature_importance'):
+        importance_df = model.get_feature_importance(feature_cols)
+        print(f"\n🔍 Top 10 Most Important Features:")
+        print(importance_df.head(10))
+    
+    # Save the model
+    import joblib
+    joblib.dump(model, 'best_lightgbm_model.pkl')
+    print("✅ LightGBM model saved as 'best_lightgbm_model.pkl'")
+    
+    # Also save training components for prediction
+    torch.save({
+        'feature_columns': feature_cols,
+        'model_type': 'lightgbm' if not USE_ENSEMBLE else 'ensemble',
+        'tfidf_model': tfidf_model,
+        'mean_vectors': mean_vectors,
+        'scaler': scaler
+    }, 'training_components.pth')
+    print("✅ Training components saved")
+    
+    print(f"\n🎉 Training complete! Best validation AUC: {val_auc:.4f}")
+    return model, val_auc
 
-    # Conservative optimizer settings
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=LEARNING_RATE,  # Very low learning rate
-        betas=(0.9, 0.999),
-        weight_decay=0.01
-    )
-
-    # --- Training Loop ---
-    print(f"\n--- 3. Starting Training ---")
-    print(f"Training samples: {len(train_dataset)}")
-    print(f"Learning rate: {LEARNING_RATE}")
-    
-    best_auc = 0.0
-    nan_count = 0
-    max_nan_batches = 10  # Stop if too many NaN batches
-    
-    for epoch in range(NUM_EPOCHS):
-        print(f"\nStarting Epoch {epoch+1}/{NUM_EPOCHS}")
-        model.train()
-        total_loss = 0
-        valid_batches = 0
-        
-        for batch_idx, batch in enumerate(train_dataloader):
-            # Move data to device
-            input_ids = batch['input_ids'].to(DEVICE)
-            attention_mask = batch['attention_mask'].to(DEVICE)
-            numerical_features = batch['numerical_features'].to(DEVICE)
-            labels = batch['labels'].to(DEVICE)
-
-            # Check for NaN in input data
-            if (check_for_nan(input_ids, "input_ids") or 
-                check_for_nan(attention_mask, "attention_mask") or
-                check_for_nan(numerical_features, "numerical_features") or
-                check_for_nan(labels, "labels")):
-                nan_count += 1
-                print(f"⚠️ Skipping batch {batch_idx} due to NaN in inputs")
-                if nan_count >= max_nan_batches:
-                    print("❌ Too many NaN batches, stopping training")
-                    return
-                continue
-
-            optimizer.zero_grad()
-            
-            # Forward pass
-            logits = model(input_ids, attention_mask, numerical_features)
-            
-            # Safe loss computation
-            loss = safe_loss_computation(
-                logits, labels, numerical_features, 
-                criterion, USE_ADVANCED_LOSS
-            )
-            
-            # Skip if loss is still problematic
-            if torch.isnan(loss) or torch.isinf(loss):
-                nan_count += 1
-                print(f"⚠️ Skipping batch {batch_idx} due to NaN loss")
-                if nan_count >= max_nan_batches:
-                    print("❌ Too many NaN losses, stopping training")
-                    return
-                continue
-            
-            # Backward pass
-            loss.backward()
-            
-            # Gradient clipping
-            if USE_GRADIENT_CLIPPING:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
-            
-            # Check for NaN gradients
-            for name, param in model.named_parameters():
-                if param.grad is not None and check_for_nan(param.grad, f"grad_{name}"):
-                    print(f"⚠️ NaN gradients in {name}, skipping update")
-                    optimizer.zero_grad()
-                    continue
-            
-            optimizer.step()
-            
-            total_loss += loss.item()
-            valid_batches += 1
-            
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
-            
-            if batch_idx > len(train_dataloader) * 2:
-                print(f"⚠️ Breaking loop safety check")
-                break
-
-        if valid_batches == 0:
-            print("❌ No valid batches in epoch, stopping training")
-            break
-            
-        avg_loss = total_loss / valid_batches
-        
-        # Validation
-        validation_auc, _, _ = evaluate_model(model, validation_dataloader, DEVICE)
-        
-        print(f"\n--- Epoch {epoch+1} Complete ---")
-        print(f"Average Training Loss: {avg_loss:.4f}")
-        print(f"Validation AUC: {validation_auc:.4f}")
-        print(f"NaN batches skipped: {nan_count}")
-        
-        # Save best model
-        if validation_auc > best_auc and not np.isnan(validation_auc):
-            torch.save(model.state_dict(), 'best_model.pth')
-            # Also save training components
-            torch.save({
-                'tokenizer_vocab': tokenizer.vocab,
-                'tokenizer_vocab_size': tokenizer.vocab_size,
-                'num_numerical_features': num_numerical_features,
-                'vocab_size': VOCAB_SIZE,
-                'tfidf_model': tfidf_model,
-                'mean_vectors': mean_vectors,
-                'scaler': scaler
-            }, 'training_components.pth')
-            print(f"✅ New best model saved! AUC: {validation_auc:.4f}")
-            best_auc = validation_auc
-    
-    print(f"\nTraining complete. Best validation AUC: {best_auc:.4f}")
 
 # --- Execute Script ---
 if __name__ == '__main__':
