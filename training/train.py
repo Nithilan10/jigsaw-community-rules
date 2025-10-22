@@ -43,6 +43,21 @@ def calculate_comparative_features(df: pd.DataFrame) -> pd.DataFrame:
         print("🔄 Skipping comparative features...")
         return df
     
+    # Find the text column (could be 'comment_text', 'body', 'text', etc.)
+    text_column = None
+    possible_text_columns = ['comment_text', 'body', 'text', 'comment', 'content', 'message']
+    for col in possible_text_columns:
+        if col in df.columns:
+            text_column = col
+            break
+    
+    if text_column is None:
+        print("⚠️  No text column found. Available columns:", list(df.columns))
+        print("🔄 Skipping comparative features...")
+        return df
+    
+    print(f"📝 Using text column: '{text_column}'")
+    
     # Group by subreddit and rule to compare examples
     comparative_features = []
     
@@ -70,7 +85,7 @@ def calculate_comparative_features(df: pd.DataFrame) -> pd.DataFrame:
         
         # Calculate comparative features for each comment in this group
         for _, row in group.iterrows():
-            comment_text = str(row['comment_text']).strip()
+            comment_text = str(row[text_column]).strip()
             if not comment_text:
                 continue
             
