@@ -8,6 +8,9 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.feature_selection import SelectFromModel
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
 from typing import Tuple
 from torch.cuda.amp import autocast, GradScaler
 from collections import Counter
@@ -1030,8 +1033,6 @@ def train_model():
     
     # 1. Feature Selection using RandomForest
     print("🔍 Performing feature selection with RandomForest...")
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.feature_selection import SelectFromModel
     
     # Create feature selector
     rf_selector = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
@@ -1064,11 +1065,9 @@ def train_model():
         # Check dataset size for memory considerations in Colab
         dataset_size = len(X_train_selected)
         if dataset_size > 10000:  # Large dataset - use memory efficient option
-            from sklearn.tree import DecisionTreeClassifier
             pdc_base_model = DecisionTreeClassifier(max_depth=8, random_state=42)
             print(f"📊 Using memory-efficient DecisionTree for PDC (dataset size: {dataset_size})")
         else:
-            from sklearn.ensemble import RandomForestClassifier
             pdc_base_model = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
             print(f"📊 Using RandomForest for PDC (dataset size: {dataset_size})")
         
@@ -1085,7 +1084,6 @@ def train_model():
         if dataset_size > 5000:
             print("📊 Large dataset detected, using subset for PDC training...")
             # Use stratified sampling to maintain class balance
-            from sklearn.model_selection import train_test_split
             X_subset, _, y_subset, _ = train_test_split(
                 X_train_numeric, y_train, 
                 test_size=0.7, 
