@@ -49,6 +49,17 @@ try:
 except ImportError:
     _HAS_SPACY = False
 
+# Try to import PDC for enhanced performance
+# PDC is sklearn-compatible and can be saved/loaded offline like regular sklearn models
+try:
+    from pdll import PairwiseDifferenceClassifier
+    PDC_AVAILABLE = True
+    print("✅ PairwiseDifferenceClassifier (PDC) available - will use for enhanced performance")
+    print("📝 Note: PDC is sklearn-compatible and supports offline model saving/loading")
+except ImportError:
+    PDC_AVAILABLE = False
+    print("⚠️  PDC not available - using standard models. Install with: pip install pdll")
+
 # Constants for feature extraction
 LEXICAL_CUES = r'\b(you should|you must|i suggest|my advice|best way is to)\b'
 SEMANTIC_KEYWORDS = r'\b(sue|lawyer|court|filing|testimony|statute|jurisdiction|legal advice)\b'
@@ -1092,7 +1103,7 @@ def extract_advanced_tfidf_features(text: str, tfidf_models: dict) -> dict:
 
 def get_empty_advanced_tfidf_features() -> dict:
     """Return empty advanced TF-IDF features."""
-    return {
+        return {
         'standard_tfidf_sum': 0.0,
         'standard_tfidf_mean': 0.0,
         'standard_tfidf_max': 0.0,
@@ -1902,14 +1913,14 @@ def calculate_simple_features(df: pd.DataFrame, scaler: RobustScaler = None) -> 
         current_features = set(continuous_features)
         
         if expected_features == current_features:
-            try:
-                df[continuous_features] = scaler.transform(df[continuous_features])
+        try:
+            df[continuous_features] = scaler.transform(df[continuous_features])
                 print(f"✅ Used existing scaler for {len(continuous_features)} features")
-            except ValueError as e:
+        except ValueError as e:
                 print(f"⚠️  Scaler transform failed: {e}")
-                print("🔄 Creating new scaler for inference...")
-                scaler = RobustScaler()
-                df[continuous_features] = scaler.fit_transform(df[continuous_features])
+            print("🔄 Creating new scaler for inference...")
+            scaler = RobustScaler()
+            df[continuous_features] = scaler.fit_transform(df[continuous_features])
                 print(f"✅ Created new scaler for {len(continuous_features)} features")
         else:
             print(f"⚠️  Feature mismatch: expected {len(expected_features)}, got {len(current_features)}")
@@ -2083,7 +2094,7 @@ def preprocess_data(file_path=None, df_to_process=None, tfidf_model=None, mean_v
             # Check if the TF-IDF model is properly fitted
             if hasattr(tfidf_model, 'idf_') and tfidf_model.idf_ is not None:
                 print("✅ TF-IDF model is properly fitted, calculating similarity features...")
-                df = calculate_similarity_features(df, tfidf_model, mean_vectors)
+    df = calculate_similarity_features(df, tfidf_model, mean_vectors)
                 print("✅ Similarity features calculated successfully")
             else:
                 print("⚠️  TF-IDF model not properly fitted, attempting to refit...")
@@ -2128,7 +2139,7 @@ def preprocess_data(file_path=None, df_to_process=None, tfidf_model=None, mean_v
             # Check if the TF-IDF model is properly fitted
             if hasattr(tfidf_model, 'idf_') and tfidf_model.idf_ is not None:
                 print("✅ TF-IDF model is properly fitted, calculating consistency features...")
-                df = calculate_consistency_features(df, tfidf_model, mean_vectors)
+    df = calculate_consistency_features(df, tfidf_model, mean_vectors)
                 print("✅ Consistency features calculated successfully")
             else:
                 print("⚠️  TF-IDF model not properly fitted, attempting to refit...")
@@ -2286,7 +2297,7 @@ def preprocess_data(file_path=None, df_to_process=None, tfidf_model=None, mean_v
     # 11. Calculate Feature Selection and Engineering Features
     # Only calculate these features if we have target data (not for test data)
     if 'rule_violation' in df.columns:
-        df = calculate_feature_selection_engineering_features(df)
+    df = calculate_feature_selection_engineering_features(df)
     else:
         print("ℹ️  Target column 'rule_violation' not found (expected for test data). Creating PCA features for test data...")
         
@@ -2665,18 +2676,30 @@ if __name__ == "__main__":
     for path in model_paths:
         try:
             # Load model directly (no __file__ dependency)
-            model = joblib.load(path)
-            print(f"✅ LightGBM model loaded from: {path}")
+            base_model = joblib.load(path)
+            print(f"✅ Base model loaded from: {path}")
             
-            # Determine model type
-            if hasattr(model, 'lgb_model') and hasattr(model, 'xgb_model'):
+            # Determine model type and wrap with PDC if available
+            if hasattr(base_model, 'lgb_model') and hasattr(base_model, 'xgb_model'):
                 model_type = 'ensemble'
                 print("✅ Loaded ensemble model (LightGBM + XGBoost)")
-            elif hasattr(model, 'model') and hasattr(model, 'predict_proba'):
+                if PDC_AVAILABLE:
+                    model = PairwiseDifferenceClassifier(base_model)
+                    print("🚀 Enhanced with PairwiseDifferenceClassifier (PDC) for better performance")
+                else:
+                    model = base_model
+                    print("⚠️  Using base ensemble model (PDC not available)")
+            elif hasattr(base_model, 'model') and hasattr(base_model, 'predict_proba'):
                 model_type = 'lightgbm'
                 print("✅ Loaded LightGBM model")
+                if PDC_AVAILABLE:
+                    model = PairwiseDifferenceClassifier(base_model)
+                    print("🚀 Enhanced with PairwiseDifferenceClassifier (PDC) for better performance")
             else:
-                print(f"⚠️  Unknown model type: {type(model)}")
+                    model = base_model
+                    print("⚠️  Using base LightGBM model (PDC not available)")
+            else:
+                print(f"⚠️  Unknown model type: {type(base_model)}")
                 continue
             break
     except Exception as e:
@@ -2684,8 +2707,23 @@ if __name__ == "__main__":
             continue
     
     if model is None:
-        print("❌ Could not load LightGBM model. Creating dummy predictions.")
-        predictions = np.random.random(len(test_df_processed))
+        print("❌ Could not load LightGBM model. Creating fallback model...")
+        if PDC_AVAILABLE:
+            # Check dataset size for memory considerations
+            dataset_size = len(test_df_processed)
+            if dataset_size > 50000:  # Large dataset - use memory efficient option
+                from sklearn.tree import DecisionTreeClassifier
+                base_model = DecisionTreeClassifier(random_state=42, max_depth=8)
+                model = PairwiseDifferenceClassifier(base_model)
+                print(f"🚀 Created memory-efficient DecisionTreeClassifier + PDC for large dataset ({dataset_size} rows)")
+            else:
+                from sklearn.ensemble import RandomForestClassifier
+                base_model = RandomForestClassifier(n_estimators=50, random_state=42, max_depth=10)
+                model = PairwiseDifferenceClassifier(base_model)
+                print(f"🚀 Created RandomForestClassifier + PDC for dataset ({dataset_size} rows)")
+        else:
+            print("⚠️  Creating dummy predictions (no PDC available)")
+            predictions = np.random.random(len(test_df_processed))
     else:
         # Prepare data for LightGBM model - only numerical columns
         numerical_columns = test_df_processed.select_dtypes(include=[np.number]).columns.tolist()

@@ -24,12 +24,246 @@ from custom_model import CustomTransformerModel, LightGBMModel, XGBoostModel, En
 from custom_loss import (CustomCostSensitiveLoss, CombinedAdvancedLoss)
 
 # ============================================================================
+# ADVANCED SIMILARITY ANALYSIS FUNCTIONS
+# ============================================================================
+
+def calculate_semantic_similarity_features(comment_text: str, positive_examples: list, negative_examples: list) -> dict:
+    """Calculate advanced semantic similarity features."""
+    features = {}
+    
+    # 1. TF-IDF based semantic similarity
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    
+    try:
+        # Create TF-IDF vectors
+        all_texts = [comment_text] + positive_examples + negative_examples
+        tfidf = TfidfVectorizer(max_features=1000, stop_words='english')
+        tfidf_matrix = tfidf.fit_transform(all_texts)
+        
+        comment_vector = tfidf_matrix[0:1]
+        pos_vectors = tfidf_matrix[1:1+len(positive_examples)]
+        neg_vectors = tfidf_matrix[1+len(positive_examples):]
+        
+        # Calculate similarities
+        pos_similarities = cosine_similarity(comment_vector, pos_vectors).flatten()
+        neg_similarities = cosine_similarity(comment_vector, neg_vectors).flatten()
+        
+        features['semantic_similarity_to_violations'] = np.mean(pos_similarities) if len(pos_similarities) > 0 else 0.0
+        features['semantic_similarity_to_non_violations'] = np.mean(neg_similarities) if len(neg_similarities) > 0 else 0.0
+        features['semantic_similarity_diff'] = features['semantic_similarity_to_violations'] - features['semantic_similarity_to_non_violations']
+        features['semantic_similarity_ratio'] = (
+            features['semantic_similarity_to_violations'] / (features['semantic_similarity_to_non_violations'] + 1e-8)
+        )
+        
+        # Max and min similarities
+        features['max_semantic_similarity_to_violations'] = np.max(pos_similarities) if len(pos_similarities) > 0 else 0.0
+        features['min_semantic_similarity_to_violations'] = np.min(pos_similarities) if len(pos_similarities) > 0 else 0.0
+        features['max_semantic_similarity_to_non_violations'] = np.max(neg_similarities) if len(neg_similarities) > 0 else 0.0
+        features['min_semantic_similarity_to_non_violations'] = np.min(neg_similarities) if len(neg_similarities) > 0 else 0.0
+        
+    except Exception as e:
+        print(f"⚠️  Error in semantic similarity calculation: {e}")
+        # Set default values
+        for key in ['semantic_similarity_to_violations', 'semantic_similarity_to_non_violations', 
+                   'semantic_similarity_diff', 'semantic_similarity_ratio',
+                   'max_semantic_similarity_to_violations', 'min_semantic_similarity_to_violations',
+                   'max_semantic_similarity_to_non_violations', 'min_semantic_similarity_to_non_violations']:
+            features[key] = 0.0
+    
+    return features
+
+def calculate_lexical_similarity_features(comment_text: str, positive_examples: list, negative_examples: list) -> dict:
+    """Calculate lexical pattern similarity features."""
+    features = {}
+    
+    # 1. Word overlap similarity
+    comment_words = set(comment_text.lower().split())
+    
+    pos_overlaps = []
+    for pos_ex in positive_examples:
+        pos_words = set(pos_ex.lower().split())
+        overlap = len(comment_words.intersection(pos_words)) / (len(comment_words.union(pos_words)) + 1e-8)
+        pos_overlaps.append(overlap)
+    
+    neg_overlaps = []
+    for neg_ex in negative_examples:
+        neg_words = set(neg_ex.lower().split())
+        overlap = len(comment_words.intersection(neg_words)) / (len(comment_words.union(neg_words)) + 1e-8)
+        neg_overlaps.append(overlap)
+    
+    features['lexical_overlap_with_violations'] = np.mean(pos_overlaps) if pos_overlaps else 0.0
+    features['lexical_overlap_with_non_violations'] = np.mean(neg_overlaps) if neg_overlaps else 0.0
+    features['lexical_overlap_diff'] = features['lexical_overlap_with_violations'] - features['lexical_overlap_with_non_violations']
+    
+    # 2. N-gram similarity
+    def get_ngrams(text, n=2):
+        words = text.lower().split()
+        return [tuple(words[i:i+n]) for i in range(len(words)-n+1)]
+    
+    comment_bigrams = set(get_ngrams(comment_text, 2))
+    
+    pos_bigram_similarities = []
+    for pos_ex in positive_examples:
+        pos_bigrams = set(get_ngrams(pos_ex, 2))
+        similarity = len(comment_bigrams.intersection(pos_bigrams)) / (len(comment_bigrams.union(pos_bigrams)) + 1e-8)
+        pos_bigram_similarities.append(similarity)
+    
+    neg_bigram_similarities = []
+    for neg_ex in negative_examples:
+        neg_bigrams = set(get_ngrams(neg_ex, 2))
+        similarity = len(comment_bigrams.intersection(neg_bigrams)) / (len(comment_bigrams.union(neg_bigrams)) + 1e-8)
+        neg_bigram_similarities.append(similarity)
+    
+    features['bigram_similarity_with_violations'] = np.mean(pos_bigram_similarities) if pos_bigram_similarities else 0.0
+    features['bigram_similarity_with_non_violations'] = np.mean(neg_bigram_similarities) if neg_bigram_similarities else 0.0
+    features['bigram_similarity_diff'] = features['bigram_similarity_with_violations'] - features['bigram_similarity_with_non_violations']
+    
+    return features
+
+def calculate_combined_similarity_scores(comment_text: str, positive_examples: list, negative_examples: list, rule: str) -> dict:
+    """Calculate combined similarity scores for rule violation detection."""
+    features = {}
+    
+    # 1. Rule-specific similarity weights
+    rule_weights = {
+        'advertising': {'promotional': 0.4, 'legal': 0.3, 'semantic': 0.3},
+        'legal': {'legal': 0.5, 'semantic': 0.3, 'promotional': 0.2},
+        'spam': {'promotional': 0.5, 'semantic': 0.3, 'legal': 0.2},
+        'harassment': {'semantic': 0.4, 'legal': 0.3, 'promotional': 0.3},
+        'default': {'semantic': 0.4, 'legal': 0.3, 'promotional': 0.3}
+    }
+    
+    rule_type = 'default'
+    for key in rule_weights.keys():
+        if key in rule.lower():
+            rule_type = key
+            break
+    
+    weights = rule_weights[rule_type]
+    
+    # 2. Calculate weighted similarity scores
+    try:
+        # Get semantic similarities (simplified)
+        semantic_pos = np.mean([calculate_text_similarity(comment_text, pos) for pos in positive_examples]) if positive_examples else 0.0
+        semantic_neg = np.mean([calculate_text_similarity(comment_text, neg) for neg in negative_examples]) if negative_examples else 0.0
+        
+        # Get legal pattern similarities
+        legal_pos = np.mean([abs(count_legal_patterns(comment_text) - count_legal_patterns(pos)) for pos in positive_examples]) if positive_examples else 0.0
+        legal_neg = np.mean([abs(count_legal_patterns(comment_text) - count_legal_patterns(neg)) for neg in negative_examples]) if negative_examples else 0.0
+        
+        # Get promotional pattern similarities
+        promo_pos = np.mean([abs(count_promotional_patterns(comment_text) - count_promotional_patterns(pos)) for pos in positive_examples]) if positive_examples else 0.0
+        promo_neg = np.mean([abs(count_promotional_patterns(comment_text) - count_promotional_patterns(neg)) for neg in negative_examples]) if negative_examples else 0.0
+        
+        # Calculate combined scores
+        combined_violation_score = (
+            weights['semantic'] * semantic_pos +
+            weights['legal'] * (1 - legal_pos) +  # Lower distance = higher similarity
+            weights['promotional'] * (1 - promo_pos)
+        )
+        
+        combined_non_violation_score = (
+            weights['semantic'] * semantic_neg +
+            weights['legal'] * (1 - legal_neg) +
+            weights['promotional'] * (1 - promo_neg)
+        )
+        
+        features['combined_violation_similarity'] = combined_violation_score
+        features['combined_non_violation_similarity'] = combined_non_violation_score
+        features['combined_similarity_diff'] = combined_violation_score - combined_non_violation_score
+        features['combined_similarity_ratio'] = combined_violation_score / (combined_non_violation_score + 1e-8)
+        
+        # 3. Rule violation probability score
+        features['rule_violation_probability'] = combined_violation_score / (combined_violation_score + combined_non_violation_score + 1e-8)
+        
+    except Exception as e:
+        print(f"⚠️  Error in combined similarity calculation: {e}")
+        for key in ['combined_violation_similarity', 'combined_non_violation_similarity', 
+                   'combined_similarity_diff', 'combined_similarity_ratio', 'rule_violation_probability']:
+            features[key] = 0.0
+    
+    return features
+
+def calculate_text_similarity(text1: str, text2: str) -> float:
+    """Calculate text similarity using multiple methods."""
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        
+        # Simple TF-IDF cosine similarity
+        tfidf = TfidfVectorizer(max_features=100, stop_words='english')
+        tfidf_matrix = tfidf.fit_transform([text1, text2])
+        similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+        
+        return float(similarity)
+    except:
+        # Fallback to simple word overlap
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        if not words1 and not words2:
+            return 0.0
+        return len(words1.intersection(words2)) / len(words1.union(words2))
+
+def calculate_text_complexity(text: str) -> float:
+    """Calculate text complexity score."""
+    try:
+        words = text.split()
+        if not words:
+            return 0.0
+        
+        # Average word length
+        avg_word_length = np.mean([len(word) for word in words])
+        
+        # Sentence complexity (approximate)
+        sentences = text.split('.')
+        avg_sentence_length = len(words) / max(len(sentences), 1)
+        
+        # Punctuation density
+        punct_count = sum(1 for c in text if c in '.,!?;:')
+        punct_density = punct_count / len(text) if text else 0
+        
+        # Combined complexity score
+        complexity = (avg_word_length * 0.4 + avg_sentence_length * 0.4 + punct_density * 100 * 0.2)
+        return complexity
+    except:
+        return 0.0
+
+def count_legal_patterns(text: str) -> int:
+    """Count legal language patterns."""
+    legal_patterns = [
+        r'\b(attorney|lawyer|counsel|legal|court|judge|jurisdiction|statute|law|regulation)\b',
+        r'\b(sue|lawsuit|litigation|settlement|verdict|trial|hearing)\b',
+        r'\b(legal advice|legal opinion|legal counsel|legal representation)\b',
+        r'\b(constitutional|federal|state|municipal|civil|criminal)\b'
+    ]
+    
+    count = 0
+    for pattern in legal_patterns:
+        count += len(re.findall(pattern, text.lower()))
+    return count
+
+def count_promotional_patterns(text: str) -> int:
+    """Count promotional language patterns."""
+    promo_patterns = [
+        r'\b(free|discount|sale|offer|deal|promotion|limited time|act now)\b',
+        r'\b(click here|buy now|order now|get yours|don\'t miss)\b',
+        r'\b(guaranteed|money back|satisfaction|best price|lowest price)\b',
+        r'\b(exclusive|special|premium|vip|membership)\b'
+    ]
+    
+    count = 0
+    for pattern in promo_patterns:
+        count += len(re.findall(pattern, text.lower()))
+    return count
+
+# ============================================================================
 # COMPARATIVE FEATURE ENGINEERING FOR TRAINING
 # ============================================================================
 
 def calculate_comparative_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate powerful comparative features between positive and negative examples."""
-    print("🚀 Calculating comparative features for training...")
+    """Calculate powerful comparative features between positive and negative examples with advanced similarity analysis."""
+    print("🚀 Calculating advanced comparative features for training...")
     
     # Check available columns
     print(f"Available columns: {list(df.columns)}")
@@ -146,7 +380,20 @@ def calculate_comparative_features(df: pd.DataFrame) -> pd.DataFrame:
             features['legal_vs_non_violations'] = comment_legal - np.mean(neg_legal) if neg_legal else 0
             features['legal_violation_diff'] = features['legal_vs_violations'] - features['legal_vs_non_violations']
             
-            # 7. Promotional Language Comparison
+            # 7. Advanced Semantic Similarity Analysis
+            # Calculate semantic similarity using multiple methods
+            semantic_features = calculate_semantic_similarity_features(comment_text, positive_examples, negative_examples)
+            features.update(semantic_features)
+            
+            # 8. Lexical Pattern Similarity
+            lexical_features = calculate_lexical_similarity_features(comment_text, positive_examples, negative_examples)
+            features.update(lexical_features)
+            
+            # 9. Combined Similarity Scores for Rule Violation Detection
+            combined_features = calculate_combined_similarity_scores(comment_text, positive_examples, negative_examples, rule)
+            features.update(combined_features)
+            
+            # 10. Promotional Language Comparison
             comment_promo = count_promotional_patterns(comment_text)
             pos_promo = [count_promotional_patterns(ex) for ex in positive_examples]
             neg_promo = [count_promotional_patterns(ex) for ex in negative_examples]
@@ -778,22 +1025,50 @@ def train_model():
     X_train = np.nan_to_num(X_train, nan=0.0)
     X_val = np.nan_to_num(X_val, nan=0.0)
 
-    # --- Train LightGBM Model ---
-    print("\n--- 3. Training LightGBM Model ---")
+    # --- Advanced Model Training with Feature Selection ---
+    print("\n--- 3. Training Advanced Models with Feature Selection ---")
     
-    # Train LightGBM model
-    print("🚀 Training LightGBM model...")
+    # 1. Feature Selection using RandomForest
+    print("🔍 Performing feature selection with RandomForest...")
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.feature_selection import SelectFromModel
+    
+    # Create feature selector
+    rf_selector = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+    rf_selector.fit(X_train, y_train)
+    
+    # Select important features
+    feature_selector = SelectFromModel(rf_selector, threshold='median')
+    X_train_selected = feature_selector.fit_transform(X_train, y_train)
+    X_val_selected = feature_selector.transform(X_val)
+    
+    print(f"📊 Original features: {X_train.shape[1]}")
+    print(f"📊 Selected features: {X_train_selected.shape[1]}")
+    
+    # 2. Train LightGBM with selected features and PDC enhancement
+    print("🚀 Training LightGBM model with selected features...")
     if USE_ENSEMBLE:
-        model = EnsembleModel(num_rules=NUM_RULES)
+        base_model = EnsembleModel(num_rules=NUM_RULES)
     else:
-        model = LightGBMModel(num_rules=NUM_RULES)
+        base_model = LightGBMModel(num_rules=NUM_RULES)
     
-    # Train the model
-    model.fit(X_train, y_train, X_val, y_val)
+    # Train the base model with selected features
+    base_model.fit(X_train_selected, y_train, X_val_selected, y_val)
+    
+    # 3. Enhance with PDC if available
+    try:
+        from pdll import PairwiseDifferenceClassifier
+        print("🚀 Enhancing model with PairwiseDifferenceClassifier (PDC)...")
+        model = PairwiseDifferenceClassifier(base_model)
+        # PDC will use the base model's predict_proba method
+        print("✅ PDC enhancement applied successfully")
+    except ImportError:
+        print("⚠️  PDC not available, using base model")
+        model = base_model
     
     # Get predictions and evaluate
-    train_pred = model.predict_proba(X_train)
-    val_pred = model.predict_proba(X_val)
+    train_pred = model.predict_proba(X_train_selected)
+    val_pred = model.predict_proba(X_val_selected)
     
     train_auc = roc_auc_score(y_train, train_pred)
     val_auc = roc_auc_score(y_val, val_pred)
@@ -807,18 +1082,37 @@ def train_model():
         print(f"\n🔍 Top 10 Most Important Features:")
         print(importance_df.head(10))
     
-    # Save the model
+    # Feature importance from RandomForest selector
+    print(f"\n🔍 Top 10 Most Important Features (RandomForest):")
+    feature_importance = rf_selector.feature_importances_
+    selected_features = feature_selector.get_support()
+    selected_feature_names = [feature_cols[i] for i in range(len(feature_cols)) if selected_features[i]]
+    
+    # Create importance dataframe for selected features
+    selected_importance = feature_importance[selected_features]
+    importance_df_rf = pd.DataFrame({
+        'feature': selected_feature_names,
+        'importance': selected_importance
+    }).sort_values('importance', ascending=False)
+    
+    print(importance_df_rf.head(10))
+    
+    # Save the model and feature selector
     import joblib
     joblib.dump(model, 'best_lightgbm_model.pkl')
+    joblib.dump(feature_selector, 'feature_selector.pkl')
     print("✅ LightGBM model saved as 'best_lightgbm_model.pkl'")
+    print("✅ Feature selector saved as 'feature_selector.pkl'")
     
     # Also save training components for prediction
     torch.save({
         'feature_columns': feature_cols,
+        'selected_features': selected_feature_names,
         'model_type': 'lightgbm' if not USE_ENSEMBLE else 'ensemble',
         'tfidf_model': tfidf_model,
         'mean_vectors': mean_vectors,
-        'scaler': scaler
+        'scaler': scaler,
+        'feature_selector': feature_selector
     }, 'training_components.pth')
     print("✅ Training components saved")
     
