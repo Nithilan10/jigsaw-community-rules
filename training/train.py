@@ -1058,12 +1058,31 @@ def train_model():
     # 3. Enhance with PDC if available
     try:
         from pdll import PairwiseDifferenceClassifier
-        print("🚀 Enhancing model with PairwiseDifferenceClassifier (PDC)...")
-        model = PairwiseDifferenceClassifier(base_model)
-        # PDC will use the base model's predict_proba method
-        print("✅ PDC enhancement applied successfully")
+        print("🚀 Training PairwiseDifferenceClassifier (PDC)...")
+        
+        # PDC needs to be trained from scratch, not wrapped around existing model
+        # Check dataset size for memory considerations in Colab
+        dataset_size = len(X_train_selected)
+        if dataset_size > 10000:  # Large dataset - use memory efficient option
+            from sklearn.tree import DecisionTreeClassifier
+            pdc_base_model = DecisionTreeClassifier(max_depth=8, random_state=42)
+            print(f"📊 Using memory-efficient DecisionTree for PDC (dataset size: {dataset_size})")
+        else:
+            from sklearn.ensemble import RandomForestClassifier
+            pdc_base_model = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
+            print(f"📊 Using RandomForest for PDC (dataset size: {dataset_size})")
+        
+        # Train PDC with the base model
+        model = PairwiseDifferenceClassifier(pdc_base_model)
+        model.fit(X_train_selected, y_train)
+        print("✅ PDC trained successfully")
+        
     except ImportError:
         print("⚠️  PDC not available, using base model")
+        model = base_model
+    except Exception as e:
+        print(f"⚠️  PDC training failed: {e}")
+        print("🔄 Falling back to base model")
         model = base_model
     
     # Get predictions and evaluate
