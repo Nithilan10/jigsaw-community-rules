@@ -1072,10 +1072,19 @@ def train_model():
             pdc_base_model = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
             print(f"📊 Using RandomForest for PDC (dataset size: {dataset_size})")
         
+        # Ensure data types are numeric for PDC
+        print("🔧 Converting data types for PDC compatibility...")
+        X_train_numeric = X_train_selected.astype(np.float32)
+        X_val_numeric = X_val_selected.astype(np.float32)
+        
         # Train PDC with the base model
         model = PairwiseDifferenceClassifier(pdc_base_model)
-        model.fit(X_train_selected, y_train)
+        model.fit(X_train_numeric, y_train)
         print("✅ PDC trained successfully")
+        
+        # Update the selected data for predictions
+        X_train_selected = X_train_numeric
+        X_val_selected = X_val_numeric
         
     except ImportError:
         print("⚠️  PDC not available, using base model")
