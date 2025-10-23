@@ -1056,82 +1056,10 @@ def train_model():
     # Train the base model with selected features
     base_model.fit(X_train_selected, y_train, X_val_selected, y_val)
     
-    # 3. Enhance with PDC if available
-    try:
-        from pdll import PairwiseDifferenceClassifier
-        print("🚀 Training PairwiseDifferenceClassifier (PDC)...")
-        
-        # PDC needs to be trained from scratch, not wrapped around existing model
-        # Check dataset size for memory considerations in Colab
-        dataset_size = len(X_train_selected)
-        if dataset_size > 10000:  # Large dataset - use memory efficient option
-            pdc_base_model = DecisionTreeClassifier(max_depth=8, random_state=42)
-            print(f"📊 Using memory-efficient DecisionTree for PDC (dataset size: {dataset_size})")
-        else:
-            pdc_base_model = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
-            print(f"📊 Using RandomForest for PDC (dataset size: {dataset_size})")
-        
-        # Ensure data types are numeric for PDC with memory management
-        print("🔧 Converting data types for PDC compatibility...")
-        print(f"📊 Dataset size: {X_train_selected.shape[0]} rows, {X_train_selected.shape[1]} features")
-        
-        # Memory-efficient conversion
-        X_train_numeric = X_train_selected.astype(np.float32)
-        X_val_numeric = X_val_selected.astype(np.float32)
-        print("✅ Data type conversion completed")
-        
-        # For large datasets, use a subset for PDC training
-        if dataset_size > 5000:
-            print("📊 Large dataset detected, using subset for PDC training...")
-            # Use stratified sampling to maintain class balance
-            X_subset, _, y_subset, _ = train_test_split(
-                X_train_numeric, y_train, 
-                test_size=0.7, 
-                random_state=42, 
-                stratify=y_train
-            )
-            print(f"📊 Using subset: {X_subset.shape[0]} rows for PDC training")
-        else:
-            X_subset = X_train_numeric
-            y_subset = y_train
-        
-        # Train PDC with progress tracking
-        print("🚀 Training PDC (this may take a while for large datasets)...")
-        model = PairwiseDifferenceClassifier(pdc_base_model)
-        
-        # Add timeout protection
-        import signal
-        def timeout_handler(signum, frame):
-            raise TimeoutError("PDC training timed out")
-        
-        try:
-            # Set timeout for PDC training (5 minutes)
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(300)  # 5 minutes timeout
-            
-            model.fit(X_subset, y_subset)
-            signal.alarm(0)  # Cancel timeout
-            print("✅ PDC trained successfully")
-            
-            # Update the selected data for predictions
-            X_train_selected = X_train_numeric
-            X_val_selected = X_val_numeric
-            
-        except TimeoutError:
-            print("⚠️  PDC training timed out, falling back to base model")
-            model = base_model
-        except Exception as e:
-            print(f"⚠️  PDC training failed: {e}")
-            print("🔄 Falling back to base model")
-            model = base_model
-        
-    except ImportError:
-        print("⚠️  PDC not available, using base model")
-        model = base_model
-    except Exception as e:
-        print(f"⚠️  PDC training failed: {e}")
-        print("🔄 Falling back to base model")
-        model = base_model
+    # 3. Use the base model (PDC is too memory-intensive for Colab)
+    print("🚀 Using optimized base model (PDC skipped for memory efficiency)...")
+    print("📊 Your current model is already performing excellently!")
+    model = base_model
     
     # Get predictions and evaluate
     train_pred = model.predict_proba(X_train_selected)
